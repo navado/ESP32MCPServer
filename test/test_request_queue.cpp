@@ -1,5 +1,6 @@
 #include <unity.h>
 #include "RequestQueue.h"
+#include <atomic>
 #include <thread>
 #include <chrono>
 
