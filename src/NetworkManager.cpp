@@ -1,4 +1,5 @@
 #include "NetworkManager.h"
+#include "DiscoveryManager.h"
 #include <esp_random.h>
 #include <ArduinoJson.h>
 
@@ -9,6 +10,10 @@ NetworkManager::NetworkManager()
       ws("/ws"),
       connectAttempts(0),
       lastConnectAttempt(0) {
+}
+
+void NetworkManager::setDiscoveryManager(DiscoveryManager* dm) {
+    discovery_ = dm;
 }
 
 void NetworkManager::begin() {
@@ -25,6 +30,7 @@ void NetworkManager::begin() {
        if (static_cast<system_event_id_t>(event) == SYSTEM_EVENT_STA_DISCONNECTED) {
             if (state == NetworkState::CONNECTED) {
                 state = NetworkState::CONNECTION_FAILED;
+                if (discovery_) discovery_->onNetworkDisconnected();
                 queueRequest(NetworkRequest::Type::CHECK_CONNECTION);
             }
         }
@@ -76,6 +82,14 @@ void NetworkManager::setupWebServer() {
         } else {
             request->send(404, "text/plain", "Dashboard not found in filesystem");
         }
+    });
+
+    server.on("/discovery", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        this->handleDiscoveryGet(request);
+    });
+
+    server.on("/discovery", HTTP_POST, [this](AsyncWebServerRequest *request) {
+        this->handleDiscoveryPost(request);
     });
 
     server.begin();
@@ -196,6 +210,7 @@ void NetworkManager::checkConnection() {
             state = NetworkState::CONNECTED;
             connectAttempts = 0;
             ws.textAll(getNetworkStatusJson(state, getSSID(), getIPAddress()));
+            if (discovery_) discovery_->onNetworkConnected(getIPAddress());
         } else if (millis() - lastConnectAttempt >= CONNECT_TIMEOUT) {
             state = NetworkState::CONNECTION_FAILED;
             queueRequest(NetworkRequest::Type::CONNECT);
@@ -220,6 +235,7 @@ void NetworkManager::startAP() {
     
     WiFi.softAP(apSSID.c_str());
     ws.textAll(getNetworkStatusJson(state, apSSID, WiFi.softAPIP().toString()));
+    if (discovery_) discovery_->onNetworkConnected(WiFi.softAPIP().toString());
 }
 
 String NetworkManager::generateUniqueSSID() {
@@ -318,4 +334,42 @@ void NetworkManager::handleClient() {
     if (requestQueue.pop(request)) {
         handleRequest(request);
     }
+}
+
+void NetworkManager::handleDiscoveryGet(AsyncWebServerRequest *request) {
+    if (!discovery_) {
+        request->send(503, "application/json", "{\"error\":\"Discovery not configured\"}");
+        return;
+    }
+    DiscoveryConfig cfg = discovery_->getConfig();
+    JsonDocument doc;
+    doc["hostname"]          = cfg.hostname;
+    doc["fqdn"]              = String(cfg.hostname) + ".local";
+    doc["ip"]                = getIPAddress();
+    doc["mcpPort"]           = cfg.mcpPort;
+    doc["httpPort"]          = cfg.httpPort;
+    doc["broadcastInterval"] = cfg.broadcastInterval;
+    doc["broadcastPort"]     = cfg.broadcastPort;
+    doc["mdnsActive"]        = discovery_->isMdnsActive();
+    String json;
+    serializeJson(doc, json);
+    AsyncResponseStream *response = request->beginResponseStream("application/json");
+    response->print(json);
+    request->send(response);
+}
+
+void NetworkManager::handleDiscoveryPost(AsyncWebServerRequest *request) {
+    if (!discovery_) {
+        request->send(503, "application/json", "{\"error\":\"Discovery not configured\"}");
+        return;
+    }
+    if (request->hasParam("hostname", true)) {
+        String h = request->getParam("hostname", true)->value();
+        if (!h.isEmpty()) discovery_->setHostname(h);
+    }
+    if (request->hasParam("broadcastInterval", true)) {
+        String bStr = request->getParam("broadcastInterval", true)->value();
+        discovery_->setBroadcastInterval((uint32_t)bStr.toInt());
+    }
+    handleDiscoveryGet(request);
 }

@@ -77,6 +77,12 @@ public:
     String    SSID()      const { return String(""); }
     int8_t    RSSI()      const { return -70; }
 
+    // Populate mac[6] with a fixed stub address for native builds.
+    void macAddress(uint8_t* mac) const {
+        for (int i = 0; i < 6; ++i) mac[i] = static_cast<uint8_t>(i + 1);
+    }
+    String macAddress() const { return String("01:02:03:04:05:06"); }
+
     operator bool() const { return false; }
 };
 

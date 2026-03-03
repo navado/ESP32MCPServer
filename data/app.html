@@ -78,6 +78,14 @@ label{font-size:12px;color:#8892b0}
 .value-small{font-size:11px;color:#8892b0}
 .tag{display:inline-block;padding:1px 6px;border-radius:4px;background:#1f2340;color:#8892b0;font-size:11px;margin-left:4px}
 #auto-label{display:flex;align-items:center;gap:6px;font-size:12px;color:#8892b0;margin-left:8px}
+/* ── discovery ── */
+.disc-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px}
+.disc-item label{display:block;font-size:11px;color:#8892b0;text-transform:uppercase;letter-spacing:.5px;margin-bottom:4px}
+.disc-item .disc-val{font-size:14px;font-family:monospace;color:#e8eaf0}
+.disc-item .disc-val.highlight{color:#4f8ef7;font-weight:600}
+.disc-badge{display:inline-block;padding:3px 10px;border-radius:10px;font-size:11px;font-weight:600}
+.disc-badge.active{background:#1a3c1a;color:#2ecc71}
+.disc-badge.inactive{background:#3c1a1a;color:#e74c3c}
 </style>
 </head>
 <body>
@@ -93,6 +101,7 @@ label{font-size:12px;color:#8892b0}
   <div class="tab" data-panel="metrics">Metrics</div>
   <div class="tab" data-panel="logs">Logs</div>
   <div class="tab" data-panel="console">MCP Console</div>
+  <div class="tab" data-panel="discovery">Discovery</div>
 </div>
 
 <!-- ════════════════════════════════════ SENSORS ════════════════════════════════════ -->
@@ -146,6 +155,52 @@ label{font-size:12px;color:#8892b0}
       <thead><tr><th>#</th><th>Timestamp (ms)</th><th>Metric</th><th>Value</th></tr></thead>
       <tbody id="log-body"><tr><td colspan="4" class="empty">Press Query to load log entries.</td></tr></tbody>
     </table>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════ DISCOVERY ══════════════════════════════════ -->
+<div id="discovery" class="panel">
+  <div class="card">
+    <div class="card-title">mDNS / Zeroconf</div>
+    <div class="disc-grid" id="disc-info">
+      <div class="disc-item"><label>Hostname</label><div class="disc-val highlight" id="disc-hostname">—</div></div>
+      <div class="disc-item"><label>mDNS FQDN</label><div class="disc-val" id="disc-fqdn">—</div></div>
+      <div class="disc-item"><label>IP Address</label><div class="disc-val" id="disc-ip">—</div></div>
+      <div class="disc-item"><label>mDNS Status</label><div id="disc-mdns-badge"><span class="disc-badge inactive">—</span></div></div>
+      <div class="disc-item"><label>MCP Port</label><div class="disc-val" id="disc-mcp-port">—</div></div>
+      <div class="disc-item"><label>HTTP Port</label><div class="disc-val" id="disc-http-port">—</div></div>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button class="btn-secondary" id="btn-disc-refresh">Refresh</button>
+      <a href="/" style="color:#8892b0;font-size:12px;margin-left:8px">Network Setup →</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Broadcast Settings</div>
+    <div class="disc-grid">
+      <div class="disc-item"><label>Broadcast Interval</label><div class="disc-val" id="disc-bcast-interval">—</div></div>
+      <div class="disc-item"><label>Broadcast Port</label><div class="disc-val" id="disc-bcast-port">—</div></div>
+    </div>
+
+    <div style="margin-top:16px">
+      <div class="row">
+        <label style="font-size:12px;color:#8892b0">Hostname
+          <input type="text" id="disc-edit-hostname" placeholder="esp32-mcp-xxxxxx" style="margin-top:4px;width:200px">
+        </label>
+        <label style="font-size:12px;color:#8892b0">Broadcast interval
+          <select id="disc-edit-interval" style="margin-top:4px">
+            <option value="0">Disabled</option>
+            <option value="10000">10 s</option>
+            <option value="30000">30 s</option>
+            <option value="60000">1 min</option>
+            <option value="300000">5 min</option>
+          </select>
+        </label>
+        <button class="btn-primary" id="btn-disc-save" style="align-self:flex-end">Save</button>
+      </div>
+      <div id="disc-save-status" style="font-size:12px;color:#8892b0;margin-top:8px"></div>
+    </div>
   </div>
 </div>
 
@@ -524,6 +579,67 @@ document.getElementById('btn-console-send').addEventListener('click', async () =
 
 document.getElementById('btn-console-clear').addEventListener('click', () => {
   document.getElementById('console-log').innerHTML = '';
+});
+
+// ════════════════════════════════════════════════════════════════
+//  Discovery panel
+// ════════════════════════════════════════════════════════════════
+async function loadDiscovery() {
+  try {
+    const resp = await fetch('/discovery');
+    if (!resp.ok) { document.getElementById('disc-save-status').textContent = 'Discovery endpoint not available.'; return; }
+    const d = await resp.json();
+    document.getElementById('disc-hostname').textContent      = d.hostname      || '—';
+    document.getElementById('disc-fqdn').textContent          = d.fqdn          || '—';
+    document.getElementById('disc-ip').textContent            = d.ip            || '—';
+    document.getElementById('disc-mcp-port').textContent      = d.mcpPort       || '—';
+    document.getElementById('disc-http-port').textContent     = d.httpPort      || '—';
+    document.getElementById('disc-bcast-port').textContent    = d.broadcastPort || '—';
+    document.getElementById('disc-bcast-interval').textContent =
+        d.broadcastInterval === 0 ? 'Disabled'
+      : d.broadcastInterval >= 60000 ? (d.broadcastInterval/60000).toFixed(0) + ' min'
+      : (d.broadcastInterval/1000).toFixed(0) + ' s';
+    const badge = document.getElementById('disc-mdns-badge');
+    badge.innerHTML = d.mdnsActive
+      ? '<span class="disc-badge active">Active</span>'
+      : '<span class="disc-badge inactive">Inactive</span>';
+    // Pre-populate edit fields
+    document.getElementById('disc-edit-hostname').value = d.hostname || '';
+    const sel = document.getElementById('disc-edit-interval');
+    const val = String(d.broadcastInterval || 30000);
+    for (const opt of sel.options) { if (opt.value === val) { opt.selected = true; break; } }
+  } catch(e) {
+    document.getElementById('disc-save-status').textContent = 'Could not reach /discovery: ' + e.message;
+  }
+}
+
+document.getElementById('btn-disc-refresh').addEventListener('click', loadDiscovery);
+
+document.getElementById('btn-disc-save').addEventListener('click', async () => {
+  const fd = new FormData();
+  const h  = document.getElementById('disc-edit-hostname').value.trim();
+  if (h) fd.append('hostname', h);
+  fd.append('broadcastInterval', document.getElementById('disc-edit-interval').value);
+  const statusEl = document.getElementById('disc-save-status');
+  try {
+    const resp = await fetch('/discovery', { method: 'POST', body: fd });
+    if (resp.ok) {
+      statusEl.style.color = '#2ecc71';
+      statusEl.textContent = 'Saved.';
+      await loadDiscovery();
+    } else {
+      statusEl.style.color = '#e74c3c';
+      statusEl.textContent = 'Save failed (' + resp.status + ')';
+    }
+  } catch(e) {
+    statusEl.style.color = '#e74c3c';
+    statusEl.textContent = e.message;
+  }
+});
+
+// Auto-load when the Discovery tab is first activated
+document.querySelectorAll('.tab[data-panel="discovery"]').forEach(t => {
+  t.addEventListener('click', loadDiscovery, { once: true });
 });
 
 // ════════════════════════════════════════════════════════════════
