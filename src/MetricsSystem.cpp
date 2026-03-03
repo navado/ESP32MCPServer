@@ -421,7 +421,6 @@ void MetricsSystem::resetBootMetricsImpl() {
         }
         bootMetrics_[kv.first] = val;
     }
-    saveBootMetricsImpl();
 }
 
 // ---------------------------------------------------------------------------

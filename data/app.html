@@ -1,0 +1,543 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ESP32 MCP Dashboard</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f1117;color:#e8eaf0;min-height:100vh;font-size:14px}
+a{color:#4f8ef7}
+/* ── header ── */
+#header{display:flex;align-items:center;gap:12px;padding:12px 20px;background:#1a1e2e;border-bottom:1px solid #2d3150;position:sticky;top:0;z-index:100}
+#header h1{font-size:16px;font-weight:600;color:#e8eaf0;flex:1}
+#status-dot{width:10px;height:10px;border-radius:50%;background:#555;flex-shrink:0}
+#status-dot.connected{background:#2ecc71}
+#status-dot.error{background:#e74c3c}
+#status-dot.connecting{background:#f39c12;animation:pulse 1s infinite}
+#status-label{font-size:12px;color:#8892b0}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+/* ── tabs ── */
+#tabs{display:flex;background:#1a1e2e;border-bottom:1px solid #2d3150;padding:0 16px}
+.tab{padding:10px 16px;cursor:pointer;color:#8892b0;border-bottom:2px solid transparent;font-size:13px;transition:color .2s}
+.tab:hover{color:#c8cfe0}
+.tab.active{color:#4f8ef7;border-bottom-color:#4f8ef7}
+/* ── panels ── */
+.panel{display:none;padding:20px}
+.panel.active{display:block}
+/* ── cards ── */
+.card{background:#1a1e2e;border:1px solid #2d3150;border-radius:8px;padding:16px;margin-bottom:12px}
+.card-title{font-size:12px;color:#8892b0;text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px}
+/* ── sensor grid ── */
+#sensor-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:12px;margin-top:12px}
+.sensor-card{background:#1a1e2e;border:1px solid #2d3150;border-radius:8px;padding:14px}
+.sensor-card .s-type{font-weight:600;font-size:15px;color:#4f8ef7}
+.sensor-card .s-addr{font-size:11px;color:#8892b0;margin:2px 0 10px}
+.sensor-card .s-readings{font-size:13px;line-height:1.8;color:#c8cfe0;margin-top:8px;min-height:32px}
+.sensor-card .s-readings span{display:block}
+.sensor-card .s-readings .r-name{color:#8892b0;font-size:11px}
+/* ── metrics table ── */
+#metrics-table{width:100%;border-collapse:collapse;font-size:13px}
+#metrics-table th{text-align:left;padding:8px 10px;color:#8892b0;border-bottom:1px solid #2d3150;font-weight:500;font-size:11px;text-transform:uppercase}
+#metrics-table td{padding:8px 10px;border-bottom:1px solid #1f2340;vertical-align:middle}
+#metrics-table tr:hover td{background:#1f2340;cursor:pointer}
+.badge{display:inline-block;padding:2px 7px;border-radius:10px;font-size:10px;font-weight:600;text-transform:uppercase}
+.badge.counter{background:#1a3a5c;color:#4f8ef7}
+.badge.gauge{background:#1a3c1a;color:#2ecc71}
+.badge.histogram{background:#3c2a1a;color:#f39c12}
+/* ── sparkline ── */
+#history-panel{background:#141828;border:1px solid #2d3150;border-radius:8px;padding:16px;margin-top:12px;display:none}
+#history-title{font-size:12px;color:#8892b0;margin-bottom:8px}
+#sparkline{width:100%;height:80px}
+/* ── logs ── */
+#log-table{width:100%;border-collapse:collapse;font-size:12px;font-family:monospace}
+#log-table th{text-align:left;padding:6px 8px;color:#8892b0;border-bottom:1px solid #2d3150;font-size:11px}
+#log-table td{padding:5px 8px;border-bottom:1px solid #1a1e2e;color:#c8cfe0}
+/* ── console ── */
+#console-log{background:#0a0d15;border:1px solid #2d3150;border-radius:6px;padding:12px;height:340px;overflow-y:auto;font-family:monospace;font-size:12px;line-height:1.5}
+.log-out{color:#4f8ef7}
+.log-in{color:#2ecc71}
+.log-err{color:#e74c3c}
+.log-ts{color:#444;margin-right:6px}
+#console-input{width:100%;background:#0a0d15;border:1px solid #2d3150;border-radius:6px;padding:10px;color:#e8eaf0;font-family:monospace;font-size:12px;resize:vertical;height:120px;margin-top:12px}
+#console-input:focus{outline:none;border-color:#4f8ef7}
+/* ── controls ── */
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+button{padding:7px 14px;border:none;border-radius:5px;cursor:pointer;font-size:13px;font-weight:500;transition:opacity .15s}
+button:hover{opacity:.85}
+button:active{opacity:.7}
+.btn-primary{background:#4f8ef7;color:#fff}
+.btn-danger{background:#e74c3c;color:#fff}
+.btn-secondary{background:#2d3150;color:#c8cfe0}
+input[type=text],input[type=number],select{background:#1a1e2e;border:1px solid #2d3150;border-radius:5px;padding:6px 10px;color:#e8eaf0;font-size:13px}
+input[type=text]:focus,input[type=number]:focus,select:focus{outline:none;border-color:#4f8ef7}
+label{font-size:12px;color:#8892b0}
+/* ── misc ── */
+.empty{color:#555;font-size:13px;text-align:center;padding:32px}
+.value-num{font-family:monospace;color:#e8eaf0}
+.value-small{font-size:11px;color:#8892b0}
+.tag{display:inline-block;padding:1px 6px;border-radius:4px;background:#1f2340;color:#8892b0;font-size:11px;margin-left:4px}
+#auto-label{display:flex;align-items:center;gap:6px;font-size:12px;color:#8892b0;margin-left:8px}
+</style>
+</head>
+<body>
+
+<div id="header">
+  <h1>ESP32 MCP Dashboard</h1>
+  <span id="status-dot"></span>
+  <span id="status-label">Connecting…</span>
+</div>
+
+<div id="tabs">
+  <div class="tab active" data-panel="sensors">Sensors</div>
+  <div class="tab" data-panel="metrics">Metrics</div>
+  <div class="tab" data-panel="logs">Logs</div>
+  <div class="tab" data-panel="console">MCP Console</div>
+</div>
+
+<!-- ════════════════════════════════════ SENSORS ════════════════════════════════════ -->
+<div id="sensors" class="panel active">
+  <div class="row">
+    <button class="btn-primary" id="btn-scan">Scan I²C Bus</button>
+    <button class="btn-secondary" id="btn-read-all" disabled>Read All</button>
+    <label id="auto-label">
+      <input type="checkbox" id="auto-refresh"> Auto-refresh
+      <select id="auto-interval">
+        <option value="2000">2 s</option>
+        <option value="5000" selected>5 s</option>
+        <option value="10000">10 s</option>
+      </select>
+    </label>
+  </div>
+  <div id="sensor-grid"><p class="empty">Press "Scan I²C Bus" to discover connected sensors.</p></div>
+</div>
+
+<!-- ════════════════════════════════════ METRICS ════════════════════════════════════ -->
+<div id="metrics" class="panel">
+  <div class="row">
+    <button class="btn-primary" id="btn-metrics-refresh">Refresh</button>
+    <label>Category <select id="cat-filter"><option value="">All</option></select></label>
+  </div>
+  <div class="card" style="padding:0;overflow:hidden">
+    <table id="metrics-table">
+      <thead><tr>
+        <th>Name</th><th>Type</th><th>Value</th><th>Unit</th><th>Category</th>
+      </tr></thead>
+      <tbody id="metrics-body"><tr><td colspan="5" class="empty">Click Refresh to load metrics.</td></tr></tbody>
+    </table>
+  </div>
+  <div id="history-panel">
+    <div id="history-title">History — <span id="history-name"></span></div>
+    <svg id="sparkline" viewBox="0 0 600 80" preserveAspectRatio="none"></svg>
+    <div id="history-stats" style="font-size:11px;color:#8892b0;margin-top:4px;display:flex;gap:16px"></div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════ LOGS ════════════════════════════════════ -->
+<div id="logs" class="panel">
+  <div class="row">
+    <label>Metric name <input type="text" id="log-name" placeholder="(all)" style="width:180px"></label>
+    <label>Last <input type="number" id="log-seconds" value="3600" min="60" style="width:80px"> s</label>
+    <button class="btn-primary" id="btn-log-query">Query</button>
+    <button class="btn-danger" id="btn-log-clear">Clear All</button>
+  </div>
+  <div class="card" style="padding:0;overflow:hidden">
+    <table id="log-table">
+      <thead><tr><th>#</th><th>Timestamp (ms)</th><th>Metric</th><th>Value</th></tr></thead>
+      <tbody id="log-body"><tr><td colspan="4" class="empty">Press Query to load log entries.</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════ CONSOLE ════════════════════════════════════ -->
+<div id="console" class="panel">
+  <div class="row">
+    <label>Preset
+      <select id="preset-select">
+        <option value="init">initialize</option>
+        <option value="resources_list">resources/list</option>
+        <option value="sensors_scan">sensors/i2c/scan</option>
+        <option value="sensors_read">sensors/read</option>
+        <option value="metrics_list">metrics/list</option>
+        <option value="metrics_get">metrics/get</option>
+        <option value="metrics_history">metrics/history</option>
+        <option value="logs_query">logs/query</option>
+        <option value="logs_clear">logs/clear</option>
+        <option value="subscribe">resources/subscribe</option>
+        <option value="custom">— custom —</option>
+      </select>
+    </label>
+    <button class="btn-primary" id="btn-console-send">Send</button>
+    <button class="btn-secondary" id="btn-console-clear">Clear log</button>
+  </div>
+  <textarea id="console-input" spellcheck="false"></textarea>
+  <div id="console-log" style="margin-top:12px"></div>
+</div>
+
+<script>
+// ════════════════════════════════════════════════════════════════
+//  MCP WebSocket client
+// ════════════════════════════════════════════════════════════════
+const WS_PORT = 9000;
+const WS_URL  = `ws://${location.hostname}:${WS_PORT}`;
+
+class MCPClient {
+  constructor(url) {
+    this.url      = url;
+    this.pending  = new Map();
+    this.nextId   = 1;
+    this.ws       = null;
+    this.onLog    = null;   // (text, direction) => void  direction: 'out'|'in'
+    this.onStatus = null;   // (state) => void  'connected'|'disconnected'|'error'
+    this._connect();
+  }
+
+  _connect() {
+    this.ws = new WebSocket(this.url);
+    this.ws.onopen    = () => { this.onStatus && this.onStatus('connected'); };
+    this.ws.onclose   = () => { this.onStatus && this.onStatus('disconnected'); setTimeout(()=>this._connect(), 3000); };
+    this.ws.onerror   = () => { this.onStatus && this.onStatus('error'); };
+    this.ws.onmessage = (e) => {
+      this.onLog && this.onLog(e.data, 'in');
+      try {
+        const msg = JSON.parse(e.data);
+        if (msg.id !== undefined) {
+          const res = this.pending.get(msg.id);
+          if (res) { this.pending.delete(msg.id); res(msg); }
+        }
+      } catch(_) {}
+    };
+  }
+
+  send(method, params) {
+    return new Promise((resolve, reject) => {
+      if (!this.ws || this.ws.readyState !== 1) { reject(new Error('Not connected')); return; }
+      const id  = this.nextId++;
+      const msg = { jsonrpc: '2.0', method, id };
+      if (params) msg.params = params;
+      const raw = JSON.stringify(msg);
+      this.onLog && this.onLog(raw, 'out');
+      this.pending.set(id, resolve);
+      this.ws.send(raw);
+      setTimeout(() => { if (this.pending.has(id)) { this.pending.delete(id); reject(new Error('Timeout')); } }, 12000);
+    });
+  }
+
+  sendRaw(raw) {
+    return new Promise((resolve, reject) => {
+      if (!this.ws || this.ws.readyState !== 1) { reject(new Error('Not connected')); return; }
+      let id;
+      try { id = JSON.parse(raw).id; } catch(e) { reject(new Error('Invalid JSON')); return; }
+      this.onLog && this.onLog(raw, 'out');
+      if (id !== undefined) {
+        this.pending.set(id, resolve);
+        setTimeout(() => { if (this.pending.has(id)) { this.pending.delete(id); resolve({error:{message:'Timeout'}}); } }, 12000);
+      }
+      this.ws.send(raw);
+      if (id === undefined) resolve({});
+    });
+  }
+}
+
+// ════════════════════════════════════════════════════════════════
+//  Bootstrap
+// ════════════════════════════════════════════════════════════════
+const mcp = new MCPClient(WS_URL);
+
+// Connection status dot
+const dot   = document.getElementById('status-dot');
+const label = document.getElementById('status-label');
+mcp.onStatus = (s) => {
+  dot.className   = 'status-dot ' + (s === 'connected' ? 'connected' : s === 'error' ? 'error' : 'connecting');
+  label.textContent = s === 'connected' ? `Connected — ws://${location.hostname}:${WS_PORT}`
+                    : s === 'error'     ? 'WebSocket error — retrying…'
+                                        : 'Connecting…';
+};
+
+// Tab switching
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById(tab.dataset.panel).classList.add('active');
+  });
+});
+
+// ════════════════════════════════════════════════════════════════
+//  Sensors panel
+// ════════════════════════════════════════════════════════════════
+let sensorList = [];
+let autoTimer  = null;
+
+function renderSensorCard(dev) {
+  const id = dev.id || (dev.type + '_' + dev.address).toLowerCase().replace(/[^a-z0-9_]/g,'');
+  let card = document.getElementById('sc-' + id);
+  if (!card) {
+    card = document.createElement('div');
+    card.className = 'sensor-card';
+    card.id        = 'sc-' + id;
+    card.innerHTML = `<div class="s-type">${esc(dev.type||'Unknown')}</div>
+      <div class="s-addr">${esc(dev.address||'')} <span class="tag">${esc(dev.id||id)}</span></div>
+      <button class="btn-secondary" style="width:100%;margin-bottom:4px" onclick="readSensor('${esc(id)}')">Read</button>
+      <div class="s-readings" id="sr-${esc(id)}"><span style="color:#555">—</span></div>`;
+    document.getElementById('sensor-grid').appendChild(card);
+  }
+  return card;
+}
+
+async function scanBus() {
+  document.getElementById('btn-scan').disabled = true;
+  try {
+    const resp = await mcp.send('sensors/i2c/scan');
+    const devs = resp.result && resp.result.devices ? resp.result.devices : [];
+    sensorList  = devs;
+    const grid  = document.getElementById('sensor-grid');
+    if (!devs.length) { grid.innerHTML = '<p class="empty">No I²C devices found on the bus.</p>'; return; }
+    grid.innerHTML = '';
+    devs.forEach(renderSensorCard);
+    document.getElementById('btn-read-all').disabled = false;
+  } catch(e) { alert('Scan failed: ' + e.message); }
+  finally { document.getElementById('btn-scan').disabled = false; }
+}
+
+async function readSensor(sensorId) {
+  try {
+    const resp = await mcp.send('sensors/read', { sensorId });
+    if (resp.error) { document.getElementById('sr-' + sensorId).innerHTML = `<span style="color:#e74c3c">${esc(resp.error.message)}</span>`; return; }
+    const r   = resp.result || {};
+    const rdg = r.readings || {};
+    const el  = document.getElementById('sr-' + sensorId);
+    if (!el) return;
+    if (!Object.keys(rdg).length) { el.innerHTML = '<span style="color:#555">No readings</span>'; return; }
+    el.innerHTML = Object.entries(rdg).map(([k,v]) =>
+      `<span><span class="r-name">${esc(k)}</span>  <b class="value-num">${fmtNum(v)}</b></span>`
+    ).join('');
+  } catch(e) { const el = document.getElementById('sr-' + sensorId); if(el) el.innerHTML = `<span style="color:#e74c3c">Error</span>`; }
+}
+
+async function readAll() {
+  for (const dev of sensorList) {
+    const id = dev.id || (dev.type+'_'+dev.address).toLowerCase().replace(/[^a-z0-9_]/g,'');
+    await readSensor(id);
+  }
+}
+
+document.getElementById('btn-scan').addEventListener('click', scanBus);
+document.getElementById('btn-read-all').addEventListener('click', readAll);
+
+document.getElementById('auto-refresh').addEventListener('change', function() {
+  clearInterval(autoTimer);
+  if (this.checked) {
+    const ms = parseInt(document.getElementById('auto-interval').value);
+    autoTimer = setInterval(readAll, ms);
+  }
+});
+document.getElementById('auto-interval').addEventListener('change', () => {
+  if (document.getElementById('auto-refresh').checked) {
+    document.getElementById('auto-refresh').dispatchEvent(new Event('change'));
+  }
+});
+
+// ════════════════════════════════════════════════════════════════
+//  Metrics panel
+// ════════════════════════════════════════════════════════════════
+let metricsData = {};   // name → {info, value}
+let selectedMetric = null;
+
+async function loadMetrics() {
+  const catSel = document.getElementById('cat-filter').value;
+  const params = catSel ? { category: catSel } : {};
+  const resp   = await mcp.send('metrics/list', params);
+  const list   = (resp.result && resp.result.metrics) || [];
+
+  // populate category filter
+  const cats = [...new Set(list.map(m => m.category).filter(Boolean))].sort();
+  const sel  = document.getElementById('cat-filter');
+  const cur  = sel.value;
+  sel.innerHTML = '<option value="">All</option>' + cats.map(c=>`<option value="${esc(c)}"${c===cur?' selected':''}>${esc(c)}</option>`).join('');
+
+  // fetch values in parallel (up to 8 at once)
+  metricsData = {};
+  list.forEach(m => metricsData[m.name] = { info: m, value: null });
+
+  const names = list.map(m => m.name);
+  for (let i = 0; i < names.length; i += 8) {
+    await Promise.all(names.slice(i, i+8).map(async name => {
+      try {
+        const r = await mcp.send('metrics/get', { name });
+        if (r.result) metricsData[name].value = r.result;
+      } catch(_) {}
+    }));
+  }
+  renderMetricsTable();
+}
+
+function renderMetricsTable() {
+  const tbody = document.getElementById('metrics-body');
+  const rows  = Object.values(metricsData);
+  if (!rows.length) { tbody.innerHTML = '<tr><td colspan="5" class="empty">No metrics registered.</td></tr>'; return; }
+  tbody.innerHTML = rows.map(({info, value}) => {
+    const v = value ? fmtMetricValue(value) : '—';
+    return `<tr onclick="showHistory('${esc(info.name)}')">
+      <td>${esc(info.name)}</td>
+      <td><span class="badge ${esc(info.type)}">${esc(info.type)}</span></td>
+      <td class="value-num">${v}</td>
+      <td class="value-small">${esc(info.unit||'')}</td>
+      <td><span class="tag">${esc(info.category||'')}</span></td>
+    </tr>`;
+  }).join('');
+}
+
+function fmtMetricValue(v) {
+  if (v.type === 'histogram') {
+    const h = v.value || {};
+    return `${fmtNum(h.mean)} <span class="value-small">(min ${fmtNum(h.min)} max ${fmtNum(h.max)} n=${h.count})</span>`;
+  }
+  return fmtNum(v.value);
+}
+
+async function showHistory(name) {
+  selectedMetric = name;
+  const panel = document.getElementById('history-panel');
+  panel.style.display = 'block';
+  document.getElementById('history-name').textContent = name;
+  document.getElementById('sparkline').innerHTML = '<text x="50%" y="50%" text-anchor="middle" fill="#555" font-size="12">Loading…</text>';
+  try {
+    const resp = await mcp.send('metrics/history', { name, seconds: 300 });
+    const entries = (resp.result && resp.result.entries) || [];
+    drawSparkline(entries);
+  } catch(e) {
+    document.getElementById('sparkline').innerHTML = `<text x="50%" y="50%" text-anchor="middle" fill="#e74c3c" font-size="12">${esc(e.message)}</text>`;
+  }
+}
+
+function drawSparkline(entries) {
+  const svg = document.getElementById('sparkline');
+  const statsEl = document.getElementById('history-stats');
+  if (!entries.length) {
+    svg.innerHTML = '<text x="50%" y="50%" text-anchor="middle" fill="#555" font-size="12">No history data in the last 5 minutes.</text>';
+    statsEl.innerHTML = '';
+    return;
+  }
+  const vals = entries.map(e => e.val);
+  const mn   = Math.min(...vals), mx = Math.max(...vals);
+  const range= mx - mn || 1;
+  const W    = 600, H = 80, PAD = 4;
+  const pts  = entries.map((e, i) => {
+    const x = PAD + (i / Math.max(entries.length - 1, 1)) * (W - 2*PAD);
+    const y = PAD + (1 - (e.val - mn) / range) * (H - 2*PAD);
+    return `${x},${y}`;
+  });
+  svg.innerHTML = [
+    `<polyline fill="none" stroke="#4f8ef7" stroke-width="1.5" points="${pts.join(' ')}"/>`,
+    `<line x1="${PAD}" y1="${H-PAD}" x2="${W-PAD}" y2="${H-PAD}" stroke="#2d3150" stroke-width="0.5"/>`,
+    pts.length > 1 ? `<circle cx="${pts[pts.length-1].split(',')[0]}" cy="${pts[pts.length-1].split(',')[1]}" r="3" fill="#4f8ef7"/>` : ''
+  ].join('');
+  const avg = vals.reduce((a,b)=>a+b,0)/vals.length;
+  statsEl.innerHTML = `<span>min <b>${fmtNum(mn)}</b></span><span>max <b>${fmtNum(mx)}</b></span><span>avg <b>${fmtNum(avg)}</b></span><span>n=<b>${entries.length}</b></span>`;
+}
+
+document.getElementById('btn-metrics-refresh').addEventListener('click', loadMetrics);
+document.getElementById('cat-filter').addEventListener('change', renderMetricsTable);
+
+// ════════════════════════════════════════════════════════════════
+//  Logs panel
+// ════════════════════════════════════════════════════════════════
+async function queryLogs() {
+  const name    = document.getElementById('log-name').value.trim();
+  const seconds = parseInt(document.getElementById('log-seconds').value) || 3600;
+  const params  = { seconds };
+  if (name) params.name = name;
+  const resp    = await mcp.send('logs/query', params);
+  const entries = (resp.result && resp.result.entries) || [];
+  const count   = (resp.result && resp.result.count)   || 0;
+  const tbody   = document.getElementById('log-body');
+  if (!entries.length) {
+    tbody.innerHTML = '<tr><td colspan="4" class="empty">No log entries found.</td></tr>';
+    return;
+  }
+  tbody.innerHTML = entries.slice(0, 500).map((e, i) =>
+    `<tr><td>${i+1}</td><td>${e.ts}</td><td>${esc(name||'(all)')}</td><td class="value-num">${fmtNum(e.val)}</td></tr>`
+  ).join('') + (count > 500 ? `<tr><td colspan="4" class="value-small" style="text-align:center">… ${count-500} more entries not shown</td></tr>` : '');
+}
+
+async function clearLogs() {
+  if (!confirm('Clear all metric logs? This cannot be undone.')) return;
+  await mcp.send('logs/clear');
+  document.getElementById('log-body').innerHTML = '<tr><td colspan="4" class="empty">Logs cleared.</td></tr>';
+}
+
+document.getElementById('btn-log-query').addEventListener('click', queryLogs);
+document.getElementById('btn-log-clear').addEventListener('click', clearLogs);
+
+// ════════════════════════════════════════════════════════════════
+//  MCP Console
+// ════════════════════════════════════════════════════════════════
+const PRESETS = {
+  init:          { method:'initialize' },
+  resources_list:{ method:'resources/list' },
+  sensors_scan:  { method:'sensors/i2c/scan' },
+  sensors_read:  { method:'sensors/read',    params:{ sensorId:'bme280_0x76' } },
+  metrics_list:  { method:'metrics/list',    params:{ category:'' } },
+  metrics_get:   { method:'metrics/get',     params:{ name:'system.heap.free' } },
+  metrics_history:{ method:'metrics/history', params:{ name:'system.heap.free', seconds:300 } },
+  logs_query:    { method:'logs/query',      params:{ name:'', seconds:3600 } },
+  logs_clear:    { method:'logs/clear' },
+  subscribe:     { method:'resources/subscribe', params:{ uri:'sensor://bme280_0x76' } },
+  custom:        null,
+};
+
+let consoleId = 100;
+
+function fillPreset() {
+  const key = document.getElementById('preset-select').value;
+  const p   = PRESETS[key];
+  if (!p) return;
+  const obj = { jsonrpc:'2.0', ...p, id: consoleId++ };
+  document.getElementById('console-input').value = JSON.stringify(obj, null, 2);
+}
+
+function appendLog(text, dir) {
+  const log  = document.getElementById('console-log');
+  const ts   = new Date().toLocaleTimeString('en',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  const line = document.createElement('div');
+  let pretty = text;
+  try { pretty = JSON.stringify(JSON.parse(text), null, 2); } catch(_) {}
+  line.className = dir === 'out' ? 'log-out' : dir === 'in' ? 'log-in' : 'log-err';
+  line.innerHTML = `<span class="log-ts">${ts}</span>${dir==='out'?'→':'←'} <pre style="display:inline-block;white-space:pre-wrap;vertical-align:top">${esc(pretty)}</pre>`;
+  log.appendChild(line);
+  log.scrollTop = log.scrollHeight;
+}
+
+// Wire console logging into the mcp client
+mcp.onLog = appendLog;
+
+document.getElementById('preset-select').addEventListener('change', fillPreset);
+fillPreset(); // fill on load
+
+document.getElementById('btn-console-send').addEventListener('click', async () => {
+  const raw = document.getElementById('console-input').value.trim();
+  if (!raw) return;
+  try { await mcp.sendRaw(raw); } catch(e) { appendLog(e.message, 'err'); }
+});
+
+document.getElementById('btn-console-clear').addEventListener('click', () => {
+  document.getElementById('console-log').innerHTML = '';
+});
+
+// ════════════════════════════════════════════════════════════════
+//  Helpers
+// ════════════════════════════════════════════════════════════════
+function esc(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function fmtNum(n) {
+  if (n === null || n === undefined) return '—';
+  const f = parseFloat(n);
+  if (isNaN(f)) return esc(String(n));
+  return Number.isInteger(f) ? f.toLocaleString() : f.toLocaleString(undefined,{maximumFractionDigits:4});
+}
+</script>
+</body>
+</html>

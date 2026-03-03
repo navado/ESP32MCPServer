@@ -10,9 +10,9 @@ MCPServer* server = nullptr;
 MockWebSocket* mockWs = nullptr;
 
 void setUp(void) {
-    mockWs = new MockWebSocket();
     server = new MCPServer(9000);
     server->begin(true);
+    mockWs = new MockWebSocket(server);
 }
 
 void tearDown(void) {

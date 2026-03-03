@@ -2,8 +2,6 @@
 #include "mock/MockLittleFS.h"
 #include <string>
 
-MockLittleFS MockFS;
-
 void setUp() {
     MockFS.begin(true);
 }

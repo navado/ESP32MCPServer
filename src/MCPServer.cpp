@@ -35,6 +35,19 @@ void MCPServer::unregisterResource(const std::string& uri) {
 }
 
 // ---------------------------------------------------------------------------
+// Extension method handlers
+// ---------------------------------------------------------------------------
+
+void MCPServer::registerMethodHandler(const std::string& method,
+                                       MethodHandler handler) {
+    methodHandlers_[method] = std::move(handler);
+}
+
+void MCPServer::unregisterMethodHandler(const std::string& method) {
+    methodHandlers_.erase(method);
+}
+
+// ---------------------------------------------------------------------------
 // Message processing (JSON-RPC 2.0)
 // ---------------------------------------------------------------------------
 
@@ -81,6 +94,13 @@ std::string MCPServer::dispatch(uint8_t clientId, const std::string& method,
     if (method == "resources/unsubscribe") {
         return handleUnsubscribe(clientId, id, params);
     }
+
+    // Check extension method handlers registered by external components
+    auto it = methodHandlers_.find(method);
+    if (it != methodHandlers_.end()) {
+        return it->second(clientId, id, params);
+    }
+
     return makeError(id, -32601, "Method not found");
 }
 
@@ -109,9 +129,10 @@ std::string MCPServer::handleResourcesList(uint32_t id, const JsonObject& /*para
 
     for (const auto& kv : resources_) {
         JsonObject obj = arr.add<JsonObject>();
-        obj["uri"]  = kv.second.uri;
-        obj["name"] = kv.second.name;
-        obj["type"] = kv.second.type;
+        obj["uri"]         = kv.second.uri;
+        obj["name"]        = kv.second.name;
+        obj["type"]        = kv.second.type;
+        obj["description"] = kv.second.value;
     }
 
     return makeResult(id, result);
@@ -129,8 +150,9 @@ std::string MCPServer::handleResourceRead(uint32_t id, const JsonObject& params)
     }
 
     JsonDocument result;
-    result["uri"]   = it->second.uri;
-    result["value"] = it->second.value;
+    result["success"] = true;
+    result["uri"]     = it->second.uri;
+    result["value"]   = it->second.value;
 
     JsonArray contents = result["contents"].to<JsonArray>();
     JsonObject content = contents.add<JsonObject>();

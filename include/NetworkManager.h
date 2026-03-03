@@ -40,6 +40,14 @@ public:
     String getIPAddress();
     String getSSID();
 
+    // Save WiFi credentials and trigger a connection attempt.
+    // Exposed as public so tests can set credentials without HTTP.
+    void saveCredentials(const String& ssid, const String& password);
+
+    // Process one pending network request synchronously (used in tests
+    // where the FreeRTOS background task is not running).
+    void handleClient();
+
 private:
     static constexpr uint32_t CONNECT_TIMEOUT = 15000; // 15 seconds
     static constexpr uint8_t MAX_CONNECT_ATTEMPTS = 3;
@@ -66,7 +74,6 @@ private:
     void checkConnection();
     
     bool loadCredentials();
-    void saveCredentials(const String& ssid, const String& password);
     void clearCredentials();
     
     String generateUniqueSSID();
