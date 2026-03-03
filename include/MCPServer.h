@@ -27,6 +27,13 @@ public:
     // is set by MockWebSocket to capture notifications.
     using SendFunc = std::function<void(uint8_t clientId, const std::string& msg)>;
 
+    // Extension point: external components register handlers for additional
+    // JSON-RPC methods (e.g. "sensors/i2c/scan", "bus/read").
+    // handler(clientId, requestId, params) → JSON-RPC response string.
+    using MethodHandler = std::function<std::string(uint8_t clientId,
+                                                     uint32_t id,
+                                                     const JsonObject& params)>;
+
     explicit MCPServer(uint16_t port = 9000);
 
     // Set up the WebSocket server and register system resources.
@@ -50,6 +57,13 @@ public:
     // Override the transport used for push notifications.
     void setSendFunc(SendFunc fn) { sendFunc_ = fn; }
 
+    // Register a handler for a custom JSON-RPC method.
+    // If method is already registered the old handler is replaced.
+    void registerMethodHandler(const std::string& method, MethodHandler handler);
+
+    // Remove a previously registered method handler.
+    void unregisterMethodHandler(const std::string& method);
+
 private:
     static constexpr const char* PROTOCOL_VERSION = "2024-11-05";
 
@@ -63,6 +77,9 @@ private:
 
     // Subscription registry: URI -> set of subscribed client IDs
     std::unordered_map<std::string, std::unordered_set<uint8_t>> subscriptions_;
+
+    // Extension method registry: method name -> handler
+    std::unordered_map<std::string, MethodHandler> methodHandlers_;
 
     // Dispatch a parsed request to the appropriate handler.
     std::string dispatch(uint8_t clientId, const std::string& method,

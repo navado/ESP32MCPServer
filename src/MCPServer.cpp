@@ -35,6 +35,19 @@ void MCPServer::unregisterResource(const std::string& uri) {
 }
 
 // ---------------------------------------------------------------------------
+// Extension method handlers
+// ---------------------------------------------------------------------------
+
+void MCPServer::registerMethodHandler(const std::string& method,
+                                       MethodHandler handler) {
+    methodHandlers_[method] = std::move(handler);
+}
+
+void MCPServer::unregisterMethodHandler(const std::string& method) {
+    methodHandlers_.erase(method);
+}
+
+// ---------------------------------------------------------------------------
 // Message processing (JSON-RPC 2.0)
 // ---------------------------------------------------------------------------
 
@@ -81,6 +94,13 @@ std::string MCPServer::dispatch(uint8_t clientId, const std::string& method,
     if (method == "resources/unsubscribe") {
         return handleUnsubscribe(clientId, id, params);
     }
+
+    // Check extension method handlers registered by external components
+    auto it = methodHandlers_.find(method);
+    if (it != methodHandlers_.end()) {
+        return it->second(clientId, id, params);
+    }
+
     return makeError(id, -32601, "Method not found");
 }
 
