@@ -129,9 +129,10 @@ std::string MCPServer::handleResourcesList(uint32_t id, const JsonObject& /*para
 
     for (const auto& kv : resources_) {
         JsonObject obj = arr.add<JsonObject>();
-        obj["uri"]  = kv.second.uri;
-        obj["name"] = kv.second.name;
-        obj["type"] = kv.second.type;
+        obj["uri"]         = kv.second.uri;
+        obj["name"]        = kv.second.name;
+        obj["type"]        = kv.second.type;
+        obj["description"] = kv.second.value;
     }
 
     return makeResult(id, result);
@@ -149,8 +150,9 @@ std::string MCPServer::handleResourceRead(uint32_t id, const JsonObject& params)
     }
 
     JsonDocument result;
-    result["uri"]   = it->second.uri;
-    result["value"] = it->second.value;
+    result["success"] = true;
+    result["uri"]     = it->second.uri;
+    result["value"]   = it->second.value;
 
     JsonArray contents = result["contents"].to<JsonArray>();
     JsonObject content = contents.add<JsonObject>();
