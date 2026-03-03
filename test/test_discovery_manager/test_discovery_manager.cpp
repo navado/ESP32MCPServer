@@ -12,7 +12,7 @@ void tearDown() {}
 // Helper: parse a broadcast payload into a JsonDocument.
 // ---------------------------------------------------------------------------
 static void parsePayload(const String& payload, JsonDocument& doc) {
-    DeserializationError err = deserializeJson(doc, payload);
+    DeserializationError err = deserializeJson(doc, payload.c_str());
     TEST_ASSERT_EQUAL((int)DeserializationError::Ok, (int)err.code());
 }
 
