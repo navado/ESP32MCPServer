@@ -195,63 +195,178 @@ pio device monitor --baud 115200
 
 ---
 
-## MCP API Reference
+## Web Dashboard
 
-All methods use JSON-RPC 2.0 over WebSocket on port **9000**.
+A browser-based dashboard is served from flash at **`http://<IP>/app`**.
 
-### Initialize
+| Tab | What it does |
+|---|---|
+| **Sensors** | Scan I²C bus, display detected devices, read values, auto-refresh |
+| **Metrics** | List all metrics, live values, sparkline history chart |
+| **Logs** | Query and clear metric log entries |
+| **MCP Console** | Interactive JSON-RPC console with preset requests and live message log |
+
+Open it after first-run WiFi setup: `http://<ESP32-IP>/app`
+
+---
+
+## HTTP Endpoints (port 80)
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/` | WiFi setup page |
+| POST | `/save` | Save WiFi credentials (`ssid`, `password` form params) |
+| GET | `/status` | Network status JSON |
+| WS | `/ws` | Real-time network status WebSocket |
+| GET | `/app` | Browser dashboard (sensor tester, metrics, logs, MCP console) |
+
+---
+
+## MCP API Reference (WebSocket port 9000)
+
+All methods use **JSON-RPC 2.0** over WebSocket.
+
+### Protocol
+
+| Method | Params | Description |
+|---|---|---|
+| `initialize` | — | Server info, protocol version, capabilities |
+| `resources/list` | — | List registered MCP resources |
+| `resources/read` | `uri` | Read a resource by URI |
+| `resources/subscribe` | `uri` | Subscribe to push updates for a resource |
+| `resources/unsubscribe` | `uri` | Cancel a subscription |
+
+### Sensors
+
+| Method | Params | Description |
+|---|---|---|
+| `sensors/i2c/scan` | — | Scan I²C bus; auto-detect and initialise drivers |
+| `sensors/read` | `sensorId` | Read all channels of one sensor (omit ID to read all) |
+
+#### `sensors/i2c/scan`
 
 ```json
-{"jsonrpc":"2.0","method":"initialize","id":1}
+{"jsonrpc":"2.0","method":"sensors/i2c/scan","id":1}
 ```
-
-### List resources
-
-```json
-{"jsonrpc":"2.0","method":"resources/list","id":2}
-```
-
-### Scan I2C bus
-
-```json
-{"jsonrpc":"2.0","method":"sensors/i2c/scan","id":3}
-```
-
 ```json
 {
-  "jsonrpc":"2.0","id":3,
-  "result":{
-    "devices":[
-      {"address":"0x76","type":"BME280","id":"bme280_76"},
-      {"address":"0x68","type":"MPU6050","id":"mpu6050_68"}
-    ]
-  }
+  "jsonrpc":"2.0","id":1,
+  "result":{"devices":[
+    {"address":"0x76","type":"BME280","id":"bme280_0x76"},
+    {"address":"0x68","type":"MPU6050","id":"mpu6050_0x68"}
+  ]}
 }
 ```
 
-### Read a sensor
+#### `sensors/read`
 
 ```json
-{"jsonrpc":"2.0","method":"sensors/read","id":4,"params":{"sensorId":"bme280_76"}}
+{"jsonrpc":"2.0","method":"sensors/read","id":2,"params":{"sensorId":"bme280_0x76"}}
 ```
-
 ```json
 {
-  "jsonrpc":"2.0","id":4,
+  "jsonrpc":"2.0","id":2,
   "result":{
-    "sensorId":"bme280_76","type":"BME280",
+    "sensorId":"bme280_0x76","type":"BME280",
     "readings":{"temperature":22.4,"humidity":58.1,"pressure":1013.2}
   }
 }
 ```
 
-### Subscribe to updates
+### Metrics
+
+| Method | Params | Description |
+|---|---|---|
+| `metrics/list` | `category?` | List all registered metrics (name, type, unit, category) |
+| `metrics/get` | `name` | Current value of one metric |
+| `metrics/history` | `name`, `seconds?` | Historical samples for one metric (default: last 300 s) |
+
+#### `metrics/list`
 
 ```json
-{"jsonrpc":"2.0","method":"resources/subscribe","id":5,"params":{"uri":"sensor://bme280_76"}}
+{"jsonrpc":"2.0","method":"metrics/list","id":3,"params":{"category":"system"}}
+```
+```json
+{
+  "jsonrpc":"2.0","id":3,
+  "result":{"metrics":[
+    {"name":"system.heap.free","type":"gauge","description":"Free heap","unit":"bytes","category":"system"},
+    {"name":"system.uptime","type":"counter","description":"Uptime","unit":"s","category":"system"}
+  ]}
+}
 ```
 
-The server pushes `notifications/resources/updated` messages whenever the value changes.
+#### `metrics/get`
+
+```json
+{"jsonrpc":"2.0","method":"metrics/get","id":4,"params":{"name":"system.heap.free"}}
+```
+```json
+{
+  "jsonrpc":"2.0","id":4,
+  "result":{"name":"system.heap.free","type":"gauge","value":214032,"unit":"bytes","category":"system","timestamp":1234567890}
+}
+```
+
+For histogram metrics `value` is an object: `{"mean":…,"min":…,"max":…,"count":…}`.
+
+#### `metrics/history`
+
+```json
+{"jsonrpc":"2.0","method":"metrics/history","id":5,"params":{"name":"system.heap.free","seconds":60}}
+```
+```json
+{
+  "jsonrpc":"2.0","id":5,
+  "result":{"name":"system.heap.free","entries":[
+    {"ts":1234567800,"val":214100},
+    {"ts":1234567830,"val":214032}
+  ]}
+}
+```
+
+### Logs
+
+| Method | Params | Description |
+|---|---|---|
+| `logs/query` | `name?`, `seconds?` | Query binary metric log (default: last 3600 s) |
+| `logs/clear` | — | Delete all log entries from LittleFS |
+
+#### `logs/query`
+
+```json
+{"jsonrpc":"2.0","method":"logs/query","id":6,"params":{"name":"system.heap.free","seconds":120}}
+```
+```json
+{
+  "jsonrpc":"2.0","id":6,
+  "result":{"name":"system.heap.free","count":4,"entries":[
+    {"ts":1234567810,"val":214100},
+    {"ts":1234567840,"val":214032}
+  ]}
+}
+```
+
+#### `logs/clear`
+
+```json
+{"jsonrpc":"2.0","method":"logs/clear","id":7}
+```
+```json
+{"jsonrpc":"2.0","id":7,"result":{"ok":true}}
+```
+
+### Subscriptions
+
+```json
+{"jsonrpc":"2.0","method":"resources/subscribe","id":8,"params":{"uri":"sensor://bme280_0x76"}}
+```
+
+After subscribing the server pushes unsolicited `notifications/resources/updated` on every value change:
+
+```json
+{"jsonrpc":"2.0","method":"notifications/resources/updated","params":{"uri":"sensor://bme280_0x76"}}
+```
 
 ### TypeScript client example
 

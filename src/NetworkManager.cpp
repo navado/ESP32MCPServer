@@ -70,6 +70,14 @@ void NetworkManager::setupWebServer() {
         this->handleStatus(request);
     });
 
+    server.on("/app", HTTP_GET, [](AsyncWebServerRequest *request) {
+        if (LittleFS.exists("/app.html")) {
+            request->send(LittleFS, "/app.html", "text/html");
+        } else {
+            request->send(404, "text/plain", "Dashboard not found in filesystem");
+        }
+    });
+
     server.begin();
 }
 
