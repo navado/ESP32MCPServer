@@ -1,6 +1,9 @@
 #include <unity.h>
 #include "MetricsSystem.h"
 #include <LittleFS.h>
+#include <WiFi.h>
+
+using namespace mcp;
 
 void setUp(void) {
     LittleFS.begin(true);

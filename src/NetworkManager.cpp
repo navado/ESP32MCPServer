@@ -312,3 +312,10 @@ void NetworkManager::queueRequest(NetworkRequest::Type type, const String &messa
         Serial.println("Request queue is full!");
     }
 }
+
+void NetworkManager::handleClient() {
+    NetworkRequest request;
+    if (requestQueue.pop(request)) {
+        handleRequest(request);
+    }
+}

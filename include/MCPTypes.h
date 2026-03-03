@@ -40,6 +40,7 @@ struct MCPResource {
     std::string type;
     std::string value;
 
+    MCPResource() = default;
     MCPResource(const std::string &n, const std::string &u, const std::string &t, const std::string &v)
         : name(n), uri(u), type(t), value(v) {}
 };
