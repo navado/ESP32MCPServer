@@ -9,6 +9,21 @@ static constexpr const char* KEY_HOST   = "hostname";
 static constexpr const char* KEY_BCAST  = "bcast_ms";
 static constexpr const char* BCAST_ADDR = "255.255.255.255";
 
+// MCP methods advertised in every capability beacon.
+static const char* const MCP_METHODS[] = {
+    "initialize",
+    "resources/list", "resources/subscribe", "resources/unsubscribe",
+    "sensors/i2c/scan", "sensors/read",
+    "metrics/list", "metrics/get", "metrics/history",
+    "logs/query", "logs/clear",
+};
+static constexpr size_t MCP_METHODS_COUNT =
+    sizeof(MCP_METHODS) / sizeof(MCP_METHODS[0]);
+
+// ---------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------
+
 void DiscoveryManager::begin(const DiscoveryConfig& cfg) {
     // Stop any previously active mDNS session and reset runtime state so that
     // calling begin() a second time (e.g. in unit tests) starts from a clean
@@ -44,6 +59,10 @@ void DiscoveryManager::update() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Network events
+// ---------------------------------------------------------------------------
+
 void DiscoveryManager::onNetworkConnected(const String& ip) {
     currentIp_ = ip;
     startMDNS();
@@ -55,6 +74,10 @@ void DiscoveryManager::onNetworkDisconnected() {
     currentIp_ = "";
     stopMDNS();
 }
+
+// ---------------------------------------------------------------------------
+// Configuration mutators
+// ---------------------------------------------------------------------------
 
 void DiscoveryManager::setHostname(const String& hostname) {
     if (hostname == config_.hostname) return;
@@ -71,24 +94,86 @@ void DiscoveryManager::setBroadcastInterval(uint32_t ms) {
     saveConfig();
 }
 
+void DiscoveryManager::setSensors(const std::vector<DiscoverySensorInfo>& sensors) {
+    sensors_ = sensors;
+    // Announce immediately so LAN clients learn about the new sensors without
+    // waiting for the next periodic broadcast.
+    announceCapabilityChange();
+}
+
+void DiscoveryManager::clearSensors() {
+    sensors_.clear();
+    announceCapabilityChange();
+}
+
+void DiscoveryManager::announceCapabilityChange() {
+    if (currentIp_.isEmpty()) return; // not yet connected; will announce on connect
+    // Restart mDNS so TXT records reflect the latest sensor list.
+    stopMDNS();
+    startMDNS();
+    // Send an immediate broadcast beacon.
+    sendBroadcast();
+    lastBroadcast_ = millis();
+}
+
+// ---------------------------------------------------------------------------
+// Introspection
+// ---------------------------------------------------------------------------
+
 DiscoveryConfig DiscoveryManager::getConfig() const {
     return config_;
 }
 
+// ---------------------------------------------------------------------------
+// Broadcast payload (public for testing)
+// ---------------------------------------------------------------------------
+
 String DiscoveryManager::buildBroadcastPayload() const {
     JsonDocument doc;
-    doc["device"]    = "esp32-mcp-server";
-    doc["hostname"]  = config_.hostname;
-    doc["fqdn"]      = String(config_.hostname) + ".local";
-    doc["ip"]        = currentIp_;
+
+    // --- Identity ----------------------------------------------------------
+    doc["discovery"]  = "mcp-v1";    // protocol marker for receivers
+    doc["device"]     = "esp32-mcp-server";
+    doc["hostname"]   = config_.hostname;
+    doc["fqdn"]       = String(config_.hostname) + ".local";
+    doc["ip"]         = currentIp_;
+
+    // --- Server info (mirrors MCP initialize response) ---------------------
+    JsonObject serverInfo    = doc["serverInfo"].to<JsonObject>();
+    serverInfo["name"]       = "esp32-mcp-server";
+    serverInfo["version"]    = "1.0.0";
+
+    // --- Transport ---------------------------------------------------------
     doc["mcpPort"]   = config_.mcpPort;
     doc["httpPort"]  = config_.httpPort;
-    doc["version"]   = "1.0.0";
 
-    JsonArray caps = doc["capabilities"].to<JsonArray>();
-    caps.add("mcp");
-    caps.add("sensors");
-    caps.add("metrics");
+    // --- MCP capabilities (mirrors initialize capabilities object) ---------
+    JsonObject caps         = doc["capabilities"].to<JsonObject>();
+    caps["resources"]       = true;
+    caps["subscriptions"]   = true;
+    caps["sensors"]         = true;
+    caps["metrics"]         = true;
+
+    // --- Registered MCP methods --------------------------------------------
+    JsonArray methods = doc["methods"].to<JsonArray>();
+    for (size_t i = 0; i < MCP_METHODS_COUNT; ++i) {
+        methods.add(MCP_METHODS[i]);
+    }
+
+    // --- Detected sensors --------------------------------------------------
+    JsonArray sensArr = doc["sensors"].to<JsonArray>();
+    for (const auto& s : sensors_) {
+        JsonObject sObj = sensArr.add<JsonObject>();
+        sObj["id"]   = s.id.c_str();
+        sObj["type"] = s.type.c_str();
+        char addrBuf[8];
+        snprintf(addrBuf, sizeof(addrBuf), "0x%02x", s.address);
+        sObj["address"] = addrBuf;
+        JsonArray params = sObj["parameters"].to<JsonArray>();
+        for (const auto& p : s.parameters) {
+            params.add(p.c_str());
+        }
+    }
 
     String out;
     serializeJson(doc, out);
@@ -105,16 +190,31 @@ void DiscoveryManager::startMDNS() {
         log_e("mDNS start failed for hostname: %s", config_.hostname.c_str());
         return;
     }
-    // Register the MCP JSON-RPC WebSocket service
-    MDNS.addService("mcp",  "tcp", config_.mcpPort);
-    MDNS.addServiceTxt("mcp", "tcp", "version", "1.0.0");
-    MDNS.addServiceTxt("mcp", "tcp", "path", "/");
-    // Register the HTTP dashboard service
+
+    // ── _mcp._tcp — MCP JSON-RPC over WebSocket ───────────────────────────
+    MDNS.addService("mcp", "tcp", config_.mcpPort);
+    MDNS.addServiceTxt("mcp", "tcp", "version",      "1.0.0");
+    MDNS.addServiceTxt("mcp", "tcp", "path",         "/");
+    MDNS.addServiceTxt("mcp", "tcp", "caps",         "resources,subscriptions,sensors,metrics");
+
+    // Embed sensor IDs in a TXT record (comma-separated, RFC 6763 §6.5 limit
+    // is 255 bytes per string, so we keep this concise).
+    if (!sensors_.empty()) {
+        String sensorIds;
+        for (size_t i = 0; i < sensors_.size(); ++i) {
+            if (i) sensorIds += ',';
+            sensorIds += sensors_[i].id.c_str();
+        }
+        MDNS.addServiceTxt("mcp", "tcp", "sensors", sensorIds.c_str());
+    }
+
+    // ── _http._tcp — REST / dashboard ────────────────────────────────────
     MDNS.addService("http", "tcp", config_.httpPort);
     MDNS.addServiceTxt("http", "tcp", "path", "/");
 
     mdnsStarted_ = true;
-    log_i("mDNS started: %s.local", config_.hostname.c_str());
+    log_i("mDNS started: %s.local  sensors=%d", config_.hostname.c_str(),
+          (int)sensors_.size());
 }
 
 void DiscoveryManager::stopMDNS() {

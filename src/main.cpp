@@ -81,6 +81,30 @@ public:
 
 using namespace mcp;
 
+// ---------------------------------------------------------------------------
+// Helper: convert the SensorManager device list to DiscoverySensorInfo
+// so DiscoveryManager can include them in capability announcements.
+// ---------------------------------------------------------------------------
+static std::vector<DiscoverySensorInfo>
+makeDiscoverySensors(const std::vector<mcp::I2CDevice>& devs) {
+    std::vector<DiscoverySensorInfo> result;
+    for (const auto& dev : devs) {
+        if (!dev.supported) continue;  // skip unrecognised addresses
+        DiscoverySensorInfo si;
+        // Construct the same id format used by SensorManager: name_0xNN (lowercase)
+        char addrBuf[8];
+        snprintf(addrBuf, sizeof(addrBuf), "0x%02x", dev.address);
+        std::string lower = dev.name;
+        for (char& c : lower) c = static_cast<char>(tolower(c));
+        si.id         = lower + "_" + addrBuf;
+        si.type       = dev.name;
+        si.address    = dev.address;
+        si.parameters = dev.parameters;
+        result.push_back(si);
+    }
+    return result;
+}
+
 // Global instances
 NetworkManager    networkManager;
 MCPServer         mcpServer;
@@ -132,6 +156,10 @@ void setup() {
 
     // Initialize MCP server
     mcpServer.begin(networkManager.isConnected());
+    // Immediately announce MCP capability so LAN listeners learn the server
+    // is ready (sensor list is still empty at this point; will be updated
+    // after the I2C scan below).
+    discoveryManager.announceCapabilityChange();
 
     // Initialize I2C and scan for sensors
     i2cBus.begin();
@@ -141,10 +169,18 @@ void setup() {
     int initialised = sensorManager->initDrivers();
     Serial.printf("Initialised %d sensor driver(s)\n", initialised);
 
+    // Advertise detected sensors; triggers an immediate capability re-announcement
+    // so the broadcast payload and mDNS TXT records include the sensor manifest.
+    discoveryManager.setSensors(makeDiscoverySensors(devices));
+
     // Register sensor MCP method handlers
     mcpServer.registerMethodHandler("sensors/i2c/scan",
         [](uint8_t /*cid*/, uint32_t id, const JsonObject& /*p*/) {
-            return sensorManager->buildScanResponse(id);
+            auto response = sensorManager->buildScanResponse(id);
+            // Re-advertise sensors whenever a client triggers a bus scan so the
+            // discovery broadcast reflects any newly attached devices.
+            discoveryManager.setSensors(makeDiscoverySensors(sensorManager->getDevices()));
+            return response;
         });
 
     mcpServer.registerMethodHandler("sensors/read",
