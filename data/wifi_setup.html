@@ -63,6 +63,33 @@
             background: #f8d7da;
             color: #721c24;
         }
+        .section-divider {
+            border: none;
+            border-top: 1px solid #ddd;
+            margin: 24px 0;
+        }
+        h3 { margin-bottom: 16px; color: #333; }
+        .hint { font-size: 12px; color: #666; margin-top: 4px; }
+        select {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+            background: white;
+        }
+        .info-box {
+            background: #e8f4fd;
+            color: #0c5460;
+            padding: 10px;
+            border-radius: 4px;
+            font-size: 13px;
+            margin-top: 10px;
+        }
+        .btn-secondary {
+            background: #6c757d;
+        }
+        .btn-secondary:hover { background: #545b62; }
     </style>
 </head>
 <body>
@@ -80,6 +107,35 @@
             <button type="submit">Connect</button>
         </form>
         <div id="status"></div>
+
+        <hr class="section-divider">
+
+        <h3>Discovery Settings</h3>
+        <p class="hint">Configure how this device announces itself on the local network.</p>
+
+        <form id="discovery-form">
+            <div class="form-group">
+                <label for="hostname">mDNS Hostname:</label>
+                <input type="text" id="hostname" name="hostname"
+                       placeholder="esp32-mcp-xxxxxx"
+                       pattern="[a-zA-Z0-9\-]+"
+                       title="Letters, numbers and hyphens only">
+                <div class="hint">Reach this device at <b><span id="fqdn-preview">…</span></b></div>
+            </div>
+            <div class="form-group">
+                <label for="broadcastInterval">Capability broadcast interval:</label>
+                <select id="broadcastInterval" name="broadcastInterval">
+                    <option value="0">Disabled</option>
+                    <option value="10000">Every 10 seconds</option>
+                    <option value="30000">Every 30 seconds</option>
+                    <option value="60000">Every 1 minute</option>
+                    <option value="300000">Every 5 minutes</option>
+                </select>
+                <div class="hint">UDP broadcast to 255.255.255.255:5354 with device capabilities.</div>
+            </div>
+            <button type="submit" class="btn-secondary">Save Discovery Settings</button>
+        </form>
+        <div id="discovery-status"></div>
     </div>
 
     <script>
@@ -150,6 +206,61 @@
                 updateStatus(data);
                 connectWebSocket();
             });
+
+        // ── Discovery Settings ──────────────────────────────────────────────
+        const hostnameInput      = document.getElementById('hostname');
+        const fqdnPreview        = document.getElementById('fqdn-preview');
+        const bcastSelect        = document.getElementById('broadcastInterval');
+        const discoveryStatusEl  = document.getElementById('discovery-status');
+
+        hostnameInput.addEventListener('input', () => {
+            const h = hostnameInput.value.trim();
+            fqdnPreview.textContent = h ? h + '.local' : '…';
+        });
+
+        async function loadDiscoverySettings() {
+            try {
+                const resp = await fetch('/discovery');
+                if (!resp.ok) return;
+                const d = await resp.json();
+                if (d.hostname) {
+                    hostnameInput.value = d.hostname;
+                    fqdnPreview.textContent = d.fqdn || (d.hostname + '.local');
+                }
+                const val = String(d.broadcastInterval || 30000);
+                for (const opt of bcastSelect.options) {
+                    if (opt.value === val) { opt.selected = true; break; }
+                }
+                if (d.fqdn) {
+                    discoveryStatusEl.innerHTML =
+                        `<div class="info-box">mDNS: <b>${d.fqdn}</b>` +
+                        (d.ip ? ` &nbsp;·&nbsp; IP: ${d.ip}` : '') +
+                        (d.mdnsActive ? ' &nbsp;·&nbsp; <span style="color:#155724">active</span>' : '') +
+                        '</div>';
+                }
+            } catch(e) { /* discovery endpoint not yet available */ }
+        }
+
+        document.getElementById('discovery-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const formData = new FormData(document.getElementById('discovery-form'));
+            try {
+                const resp = await fetch('/discovery', { method: 'POST', body: formData });
+                if (resp.ok) {
+                    const d = await resp.json();
+                    discoveryStatusEl.innerHTML =
+                        `<div class="info-box connected">Saved! Device reachable at <b>${d.fqdn}</b></div>`;
+                } else {
+                    discoveryStatusEl.innerHTML =
+                        '<div class="info-box error">Failed to save discovery settings.</div>';
+                }
+            } catch(e) {
+                discoveryStatusEl.innerHTML =
+                    `<div class="info-box error">${e.message}</div>`;
+            }
+        });
+
+        loadDiscoverySettings();
     </script>
 </body>
 </html>

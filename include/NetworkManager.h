@@ -7,6 +7,10 @@
 #include <LittleFS.h>
 #include "RequestQueue.h"
 
+// Forward declaration — avoids pulling ESP32-only headers into every translation
+// unit that includes NetworkManager.h.
+class DiscoveryManager;
+
 enum class NetworkState {
     INIT,
     CONNECTING,
@@ -44,6 +48,10 @@ public:
     // Exposed as public so tests can set credentials without HTTP.
     void saveCredentials(const String& ssid, const String& password);
 
+    // Wire in a DiscoveryManager so NetworkManager can notify it when the
+    // network connects or disconnects.  Call before begin().
+    void setDiscoveryManager(DiscoveryManager* dm);
+
     // Process one pending network request synchronously (used in tests
     // where the FreeRTOS background task is not running).
     void handleClient();
@@ -65,6 +73,7 @@ private:
     uint8_t connectAttempts;
     uint32_t lastConnectAttempt;
     NetworkCredentials credentials;
+    DiscoveryManager* discovery_ = nullptr;
 
     void setupWebServer();
     void handleRequest(const NetworkRequest& request);
@@ -83,6 +92,8 @@ private:
     void handleRoot(AsyncWebServerRequest *request);
     void handleSave(AsyncWebServerRequest *request);
     void handleStatus(AsyncWebServerRequest *request);
+    void handleDiscoveryGet(AsyncWebServerRequest *request);
+    void handleDiscoveryPost(AsyncWebServerRequest *request);
     void onWebSocketEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
                          AwsEventType type, void* arg, uint8_t* data, size_t len);
     

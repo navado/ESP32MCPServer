@@ -6,6 +6,7 @@
 #include "SensorManager.h"
 #include "I2CInterface.h"
 #include "MetricsSystem.h"
+#include "DiscoveryManager.h"
 
 // ---------------------------------------------------------------------------
 // Minimal ESP32 I2C implementation (wraps Arduino Wire library)
@@ -85,14 +86,16 @@ NetworkManager    networkManager;
 MCPServer         mcpServer;
 ESP32I2CInterface i2cBus;
 SensorManager*    sensorManager = nullptr;
+DiscoveryManager  discoveryManager;
 
 // Task handles
 TaskHandle_t mcpTaskHandle = nullptr;
 
-// MCP task function
+// MCP task function — also drives the periodic UDP broadcast.
 void mcpTask(void* parameter) {
     while (true) {
         mcpServer.handleClient();
+        discoveryManager.update();
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
@@ -106,6 +109,15 @@ void setup() {
         Serial.println("LittleFS Mount Failed");
         return;
     }
+
+    // Initialize discovery manager (loads NVS config; hostname derived from MAC
+    // if not previously set).  Must be called before networkManager.begin() so
+    // the mDNS/broadcast callbacks fire correctly when the network comes up.
+    DiscoveryConfig discoveryCfg;
+    discoveryCfg.mcpPort  = 9000;
+    discoveryCfg.httpPort = 80;
+    discoveryManager.begin(discoveryCfg);
+    networkManager.setDiscoveryManager(&discoveryManager);
 
     // Start network manager
     networkManager.begin();
