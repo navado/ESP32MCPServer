@@ -1,0 +1,75 @@
+name: Build & Test
+
+on:
+  push:
+    branches: [ main, "claude/**" ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Native unit tests (no hardware, fast)
+  # ─────────────────────────────────────────────────────────────────────────────
+  test:
+    name: Native Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache PlatformIO packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-native-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-native-
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Run native tests
+        run: pio test -e native -v
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Firmware build for ESP32-S3 (verifies the embedded build compiles cleanly)
+  # ─────────────────────────────────────────────────────────────────────────────
+  firmware:
+    name: Firmware Build (ESP32-S3)
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache PlatformIO packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-esp32s3-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-esp32s3-
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Install library dependencies
+        run: pio pkg install -e esp32-s3-devkitc-1
+
+      - name: Build firmware
+        run: pio run -e esp32-s3-devkitc-1
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: .pio/build/esp32-s3-devkitc-1/firmware.bin
+          retention-days: 14
