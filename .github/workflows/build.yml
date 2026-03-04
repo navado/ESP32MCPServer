@@ -7,9 +7,9 @@ on:
     branches: [ main ]
 
 jobs:
-  # ─────────────────────────────────────────────────────────────────────────────
-  # Native unit tests (no hardware, fast)
-  # ─────────────────────────────────────────────────────────────────────────────
+  # ───────────────────────────────────────────────────────────────────────────
+  # Native unit tests (no hardware, runs fast on every push)
+  # ───────────────────────────────────────────────────────────────────────────
   test:
     name: Native Tests
     runs-on: ubuntu-latest
@@ -35,13 +35,51 @@ jobs:
       - name: Run native tests
         run: pio test -e native -v
 
-  # ─────────────────────────────────────────────────────────────────────────────
-  # Firmware build for ESP32-S3 (verifies the embedded build compiles cleanly)
-  # ─────────────────────────────────────────────────────────────────────────────
+  # ───────────────────────────────────────────────────────────────────────────
+  # Firmware builds — one job per board, run in parallel after tests pass.
+  #
+  # Matrix columns:
+  #   env      — PlatformIO environment name (must match [env:*] in pio.ini)
+  #   platform — used to key the package cache (esp32 | nrf52)
+  #   artifact — name of the uploaded firmware artifact
+  # ───────────────────────────────────────────────────────────────────────────
   firmware:
-    name: Firmware Build (ESP32-S3)
+    name: Build ${{ matrix.env }}
     runs-on: ubuntu-latest
     needs: test
+    strategy:
+      fail-fast: false   # keep building other boards if one fails
+      matrix:
+        include:
+          # ── ESP32 family (full MCP server) ─────────────────────────────────
+          - env: esp32-s3-devkitc-1
+            platform: esp32
+            artifact: firmware-esp32s3-devkitc1
+
+          - env: esp32-devkitc
+            platform: esp32
+            artifact: firmware-esp32-devkitc
+
+          - env: esp32-c3-devkitm-1
+            platform: esp32
+            artifact: firmware-esp32c3-devkitm1
+
+          - env: adafruit-huzzah32
+            platform: esp32
+            artifact: firmware-adafruit-huzzah32
+
+          - env: m5stack-core
+            platform: esp32
+            artifact: firmware-m5stack-core
+
+          # ── nRF52840 family (sensor-only build) ────────────────────────────
+          - env: nrf52840-dk
+            platform: nrf52
+            artifact: firmware-nrf52840-dk
+
+          - env: nrf52840-feather
+            platform: nrf52
+            artifact: firmware-nrf52840-feather
 
     steps:
       - uses: actions/checkout@v4
@@ -55,21 +93,28 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.platformio
-          key: pio-esp32s3-${{ hashFiles('platformio.ini') }}
-          restore-keys: pio-esp32s3-
+          key: pio-${{ matrix.platform }}-${{ matrix.env }}-${{ hashFiles('platformio.ini') }}
+          restore-keys: |
+            pio-${{ matrix.platform }}-${{ matrix.env }}-
+            pio-${{ matrix.platform }}-
 
       - name: Install PlatformIO
         run: pip install platformio
 
       - name: Install library dependencies
-        run: pio pkg install -e esp32-s3-devkitc-1
+        run: pio pkg install -e ${{ matrix.env }}
 
       - name: Build firmware
-        run: pio run -e esp32-s3-devkitc-1
+        run: pio run -e ${{ matrix.env }}
 
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
-          name: firmware
-          path: .pio/build/esp32-s3-devkitc-1/firmware.bin
+          name: ${{ matrix.artifact }}
+          # nRF builds produce firmware.hex; ESP32 produces firmware.bin.
+          # The glob below captures whichever exists.
+          path: |
+            .pio/build/${{ matrix.env }}/firmware.bin
+            .pio/build/${{ matrix.env }}/firmware.hex
+          if-no-files-found: warn
           retention-days: 14

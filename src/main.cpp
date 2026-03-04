@@ -1,3 +1,4 @@
+#include "board_config.h"
 #include <Arduino.h>
 #include <LittleFS.h>
 #include <Wire.h>
@@ -138,8 +139,8 @@ void setup() {
     // if not previously set).  Must be called before networkManager.begin() so
     // the mDNS/broadcast callbacks fire correctly when the network comes up.
     DiscoveryConfig discoveryCfg;
-    discoveryCfg.mcpPort  = 9000;
-    discoveryCfg.httpPort = 80;
+    discoveryCfg.mcpPort  = BOARD_MCP_PORT;
+    discoveryCfg.httpPort = BOARD_HTTP_PORT;
     discoveryManager.begin(discoveryCfg);
     networkManager.setDiscoveryManager(&discoveryManager);
 
@@ -162,7 +163,7 @@ void setup() {
     discoveryManager.announceCapabilityChange();
 
     // Initialize I2C and scan for sensors
-    i2cBus.begin();
+    i2cBus.begin(BOARD_I2C_SDA, BOARD_I2C_SCL, BOARD_I2C_FREQ);
     sensorManager = new SensorManager(i2cBus);
     auto devices = sensorManager->scanBus();
     Serial.printf("Found %d I2C device(s)\n", (int)devices.size());
