@@ -65,20 +65,16 @@ std::vector<std::string> NMEAParser::split(const std::string& sentence) {
 
 double NMEAParser::parseDouble(const std::string& f, double def) {
     if (f.empty()) return def;
-    try {
-        return std::stod(f);
-    } catch (...) {
-        return def;
-    }
+    char* end;
+    double v = std::strtod(f.c_str(), &end);
+    return (end != f.c_str()) ? v : def;
 }
 
 int NMEAParser::parseInt(const std::string& f, int def) {
     if (f.empty()) return def;
-    try {
-        return std::stoi(f);
-    } catch (...) {
-        return def;
-    }
+    char* end;
+    long v = std::strtol(f.c_str(), &end, 10);
+    return (end != f.c_str()) ? static_cast<int>(v) : def;
 }
 
 bool NMEAParser::parseTime(const std::string& val,
