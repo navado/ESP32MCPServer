@@ -12,7 +12,6 @@
 #include <Wire.h>
 #include "I2CInterface.h"
 #include "SensorManager.h"
-#include "MetricsSystem.h"
 
 // ---------------------------------------------------------------------------
 // Concrete I2C implementation for nRF52840 (Arduino Wire)
