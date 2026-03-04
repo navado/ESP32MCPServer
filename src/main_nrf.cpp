@@ -10,11 +10,17 @@
 #include "board_config.h"
 #include <Arduino.h>
 #include <Wire.h>
-// Arduino.h defines min/max as C macros which conflict with std::min/std::max
-// template declarations inside <functional> (pulled in by SensorManager.h).
-// Undefine them here, after all Arduino headers are processed.
+// Arduino.h / math.h define min, max, abs, and round as single- or two-
+// argument C macros.  When C++ STL headers are included afterwards (via
+// SensorManager.h → <functional>, <mutex> → <chrono>) the preprocessor
+// mis-parses template argument lists (the comma in e.g.
+// std::chrono::round<Rep, Period>() looks like a second macro argument),
+// producing cascading parse errors.  Undefine all four after Arduino headers
+// are done and before any project header that pulls in STL.
 #undef min
 #undef max
+#undef abs
+#undef round
 #include "I2CInterface.h"
 #include "SensorManager.h"
 
