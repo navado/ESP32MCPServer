@@ -2,7 +2,13 @@
 #include <ArduinoJson.h>
 #include <ESPmDNS.h>
 #include <WiFi.h>
-#include <WiFiUDP.h>
+// ESP32 Arduino core v2.x uses WiFiUdp.h; v3.x uses WiFiUDP.h.
+// The class name (WiFiUDP) is identical in both — only the filename differs.
+#if __has_include(<WiFiUDP.h>)
+#  include <WiFiUDP.h>
+#elif __has_include(<WiFiUdp.h>)
+#  include <WiFiUdp.h>
+#endif
 #include <Preferences.h>
 
 // File-scoped UDP socket — keeps WiFiUDP.h out of the public header so it
