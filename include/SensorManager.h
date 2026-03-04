@@ -6,7 +6,9 @@
 #include <functional>
 #include <map>
 #include <memory>
+#ifndef MCP_NO_THREADS
 #include <mutex>
+#endif
 #include <string>
 #include <vector>
 
@@ -69,7 +71,9 @@ private:
     std::vector<I2CDevice>                         devices_;
     std::vector<std::unique_ptr<I2CSensorDriver>>  drivers_;
 
+#ifndef MCP_NO_THREADS
     mutable std::mutex mutex_;
+#endif
 
     // Map sensorId -> index in drivers_ for fast lookup
     std::map<std::string, size_t> driverIndex_;
