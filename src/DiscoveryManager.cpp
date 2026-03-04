@@ -2,7 +2,14 @@
 #include <ArduinoJson.h>
 #include <ESPmDNS.h>
 #include <WiFi.h>
+#include <WiFiUDP.h>
 #include <Preferences.h>
+
+// File-scoped UDP socket — keeps WiFiUDP.h out of the public header so it
+// doesn't have to be resolved by every translation unit that includes
+// DiscoveryManager.h (avoids "WiFiUDP.h: No such file or directory" on
+// non-WiFi or partial-framework build environments).
+static WiFiUDP g_udp;
 
 static constexpr const char* PREFS_NS   = "discovery";
 static constexpr const char* KEY_HOST   = "hostname";
@@ -226,9 +233,9 @@ void DiscoveryManager::stopMDNS() {
 void DiscoveryManager::sendBroadcast() {
     if (currentIp_.isEmpty() || config_.broadcastPort == 0) return;
     String payload = buildBroadcastPayload();
-    udp_.beginPacket(BCAST_ADDR, config_.broadcastPort);
-    udp_.write(reinterpret_cast<const uint8_t*>(payload.c_str()), payload.length());
-    udp_.endPacket();
+    g_udp.beginPacket(BCAST_ADDR, config_.broadcastPort);
+    g_udp.write(reinterpret_cast<const uint8_t*>(payload.c_str()), payload.length());
+    g_udp.endPacket();
 }
 
 void DiscoveryManager::saveConfig() {
