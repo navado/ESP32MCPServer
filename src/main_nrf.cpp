@@ -10,6 +10,11 @@
 #include "board_config.h"
 #include <Arduino.h>
 #include <Wire.h>
+// Arduino.h defines min/max as C macros which conflict with std::min/std::max
+// template declarations inside <functional> (pulled in by SensorManager.h).
+// Undefine them here, after all Arduino headers are processed.
+#undef min
+#undef max
 #include "I2CInterface.h"
 #include "SensorManager.h"
 
