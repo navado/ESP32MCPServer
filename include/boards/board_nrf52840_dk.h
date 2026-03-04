@@ -24,31 +24,21 @@
 // ── I2C ──────────────────────────────────────────────────────────────────────
 // Arduino Wire on nRF52 uses the pins defined by the board variant.
 // nRF52840-DK default: P0.26 = SDA, P0.27 = SCL.
-// The macros SDA / SCL are provided by the nordicnrf52 platform variant; the
-// fallback values below match the DK schematic in case they are not defined.
-#ifndef SDA
-#  define SDA 26
-#endif
-#ifndef SCL
-#  define SCL 27
-#endif
-#define BOARD_I2C_SDA       SDA
-#define BOARD_I2C_SCL       SCL
+// Do NOT define SDA/SCL as macros here — nrf52.h has struct members with
+// those names and the preprocessor would clobber them.
+#define BOARD_I2C_SDA       26
+#define BOARD_I2C_SCL       27
 #define BOARD_I2C_FREQ      400000UL
 
 // ── UART ─────────────────────────────────────────────────────────────────────
 // Serial is USB CDC (no physical pins needed).
-// Serial1 is on the Arduino header; TX and RX macros come from the variant.
-#ifndef TX
-#  define TX 6   // P0.06
-#endif
-#ifndef RX
-#  define RX 8   // P0.08
-#endif
-#define BOARD_UART_TX       TX
-#define BOARD_UART_RX       RX
-#define BOARD_UART1_TX      TX
-#define BOARD_UART1_RX      RX
+// Serial1 is on the Arduino header; P0.06 = TX, P0.08 = RX.
+// TX and RX are also struct-member names in the nRF52 SDK; define only the
+// BOARD_ aliases to avoid clashes.
+#define BOARD_UART_TX       6    // P0.06
+#define BOARD_UART_RX       8    // P0.08
+#define BOARD_UART1_TX      6
+#define BOARD_UART1_RX      8
 
 // ── Status LED ───────────────────────────────────────────────────────────────
 // LED1–LED4 are active LOW on the nRF52840-DK.

@@ -16,30 +16,21 @@
 
 // ── I2C ──────────────────────────────────────────────────────────────────────
 // SDA and SCL are labelled on the Feather silkscreen.
-// Adafruit nRF52 Arduino core maps: SDA = P0.12, SCL = P0.11.
-// The SDA/SCL macros are defined by the Adafruit nRF52 platform variant.
-#ifndef SDA
-#  define SDA 25   // Adafruit nRF52 Arduino pin 25 → P0.12
-#endif
-#ifndef SCL
-#  define SCL 26   // Adafruit nRF52 Arduino pin 26 → P0.11
-#endif
-#define BOARD_I2C_SDA       SDA
-#define BOARD_I2C_SCL       SCL
+// Adafruit nRF52 Arduino core maps: SDA = P0.12 (pin 25), SCL = P0.11 (pin 26).
+// Do NOT define SDA/SCL as macros — nrf52.h has struct members with those
+// names and the preprocessor would clobber them.
+#define BOARD_I2C_SDA       25   // Adafruit nRF52 Arduino pin 25 → P0.12
+#define BOARD_I2C_SCL       26   // Adafruit nRF52 Arduino pin 26 → P0.11
 #define BOARD_I2C_FREQ      400000UL
 
 // ── UART ─────────────────────────────────────────────────────────────────────
-// Serial is USB CDC.  Serial1 maps to the Feather TX/RX pads.
-#ifndef TX
-#  define TX 25   // P0.25
-#endif
-#ifndef RX
-#  define RX 24   // P0.24
-#endif
-#define BOARD_UART_TX       TX
-#define BOARD_UART_RX       RX
-#define BOARD_UART1_TX      TX
-#define BOARD_UART1_RX      RX
+// Serial is USB CDC.  Serial1 maps to the Feather TX/RX pads (P0.25/P0.24).
+// TX and RX are also struct-member names in the nRF52 SDK; define only the
+// BOARD_ aliases.
+#define BOARD_UART_TX       25   // P0.25
+#define BOARD_UART_RX       24   // P0.24
+#define BOARD_UART1_TX      25
+#define BOARD_UART1_RX      24
 
 // ── Status LEDs ──────────────────────────────────────────────────────────────
 // Red LED and Blue LED both active LOW.
