@@ -1,7 +1,6 @@
 #pragma once
 
 #include <Arduino.h>
-#include <WiFiUDP.h>
 #include <string>
 #include <vector>
 
@@ -114,7 +113,6 @@ private:
     bool                             mdnsStarted_   = false;
     uint32_t                         lastBroadcast_ = 0;
     String                           currentIp_;
-    WiFiUDP                          udp_;
     std::vector<DiscoverySensorInfo> sensors_;
 
     void startMDNS();
