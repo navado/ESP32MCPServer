@@ -29,7 +29,9 @@ SensorManager::SensorManager(I2CInterface& bus) : bus_(bus) {}
 // ---------------------------------------------------------------------------
 
 std::vector<I2CDevice> SensorManager::scanBus() {
+    #ifndef MCP_NO_THREADS
     std::lock_guard<std::mutex> lk(mutex_);
+    #endif
 
     // Clear previous state
     devices_.clear();
@@ -65,7 +67,9 @@ std::vector<I2CDevice> SensorManager::scanBus() {
 }
 
 int SensorManager::initDrivers() {
+    #ifndef MCP_NO_THREADS
     std::lock_guard<std::mutex> lk(mutex_);
+    #endif
 
     int count = 0;
     for (auto& drv : drivers_) {
@@ -79,7 +83,9 @@ int SensorManager::initDrivers() {
 // ---------------------------------------------------------------------------
 
 std::vector<SensorReading> SensorManager::readAll() {
+    #ifndef MCP_NO_THREADS
     std::lock_guard<std::mutex> lk(mutex_);
+    #endif
 
     std::vector<SensorReading> all;
     for (auto& drv : drivers_) {
@@ -92,7 +98,9 @@ std::vector<SensorReading> SensorManager::readAll() {
 
 std::vector<SensorReading> SensorManager::readSensor(
     const std::string& sensorId) {
+    #ifndef MCP_NO_THREADS
     std::lock_guard<std::mutex> lk(mutex_);
+    #endif
 
     auto it = driverIndex_.find(sensorId);
     if (it == driverIndex_.end()) return {};
@@ -106,12 +114,16 @@ std::vector<SensorReading> SensorManager::readSensor(
 // ---------------------------------------------------------------------------
 
 std::vector<I2CDevice> SensorManager::getDevices() const {
+    #ifndef MCP_NO_THREADS
     std::lock_guard<std::mutex> lk(mutex_);
+    #endif
     return devices_;
 }
 
 int SensorManager::driverCount() const {
+    #ifndef MCP_NO_THREADS
     std::lock_guard<std::mutex> lk(mutex_);
+    #endif
     return static_cast<int>(drivers_.size());
 }
 
@@ -130,7 +142,9 @@ static void appendStr(std::string& out, const std::string& s) {
 }
 
 std::string SensorManager::buildScanResponse(uint32_t id) const {
+    #ifndef MCP_NO_THREADS
     std::lock_guard<std::mutex> lk(mutex_);
+    #endif
 
     std::string r = "{\"jsonrpc\":\"2.0\",\"id\":";
     char tmp[32];
