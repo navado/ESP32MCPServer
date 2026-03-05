@@ -29,6 +29,9 @@ static const char* const MCP_METHODS[] = {
     "sensors/i2c/scan", "sensors/read",
     "metrics/list", "metrics/get", "metrics/history",
     "logs/query", "logs/clear",
+    "bus/history/read",
+    "bus/history/config/get",
+    "bus/history/config/set",
 };
 static constexpr size_t MCP_METHODS_COUNT =
     sizeof(MCP_METHODS) / sizeof(MCP_METHODS[0]);
@@ -107,6 +110,10 @@ void DiscoveryManager::setBroadcastInterval(uint32_t ms) {
     saveConfig();
 }
 
+void DiscoveryManager::setHistoryInfoCb(std::function<std::string()> cb) {
+    historyInfoCb_ = std::move(cb);
+}
+
 void DiscoveryManager::setSensors(const std::vector<DiscoverySensorInfo>& sensors) {
     sensors_ = sensors;
     // Announce immediately so LAN clients learn about the new sensors without
@@ -166,11 +173,21 @@ String DiscoveryManager::buildBroadcastPayload() const {
     caps["subscriptions"]   = true;
     caps["sensors"]         = true;
     caps["metrics"]         = true;
+    caps["busHistory"]      = true;
 
     // --- Registered MCP methods --------------------------------------------
     JsonArray methods = doc["methods"].to<JsonArray>();
     for (size_t i = 0; i < MCP_METHODS_COUNT; ++i) {
         methods.add(MCP_METHODS[i]);
+    }
+
+    // --- Bus history configuration -----------------------------------------
+    // The callback returns a JSON object string; embed it as a raw value.
+    if (historyInfoCb_) {
+        std::string histJson = historyInfoCb_();
+        // ArduinoJson can't deserialise into a sub-key directly without a copy,
+        // so embed via a serialised string field (clients parse it separately).
+        doc["busHistoryConfig"] = histJson.c_str();
     }
 
     // --- Detected sensors --------------------------------------------------
@@ -208,7 +225,8 @@ void DiscoveryManager::startMDNS() {
     MDNS.addService("mcp", "tcp", config_.mcpPort);
     MDNS.addServiceTxt("mcp", "tcp", "version",      "1.0.0");
     MDNS.addServiceTxt("mcp", "tcp", "path",         "/");
-    MDNS.addServiceTxt("mcp", "tcp", "caps",         "resources,subscriptions,sensors,metrics");
+    MDNS.addServiceTxt("mcp", "tcp", "caps",
+                       "resources,subscriptions,sensors,metrics,busHistory");
 
     // Embed sensor IDs in a TXT record (comma-separated, RFC 6763 §6.5 limit
     // is 255 bytes per string, so we keep this concise).

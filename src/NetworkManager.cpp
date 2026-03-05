@@ -1,5 +1,6 @@
 #include "NetworkManager.h"
 #include "DiscoveryManager.h"
+#include "BusHistory.h"
 #include <esp_random.h>
 #include <ArduinoJson.h>
 
@@ -14,6 +15,10 @@ NetworkManager::NetworkManager()
 
 void NetworkManager::setDiscoveryManager(DiscoveryManager* dm) {
     discovery_ = dm;
+}
+
+void NetworkManager::setBusHistory(mcp::BusHistory* bh) {
+    busHistory_ = bh;
 }
 
 void NetworkManager::begin() {
@@ -90,6 +95,23 @@ void NetworkManager::setupWebServer() {
 
     server.on("/discovery", HTTP_POST, [this](AsyncWebServerRequest *request) {
         this->handleDiscoveryPost(request);
+    });
+
+    server.on("/bus-history", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        this->handleBusHistoryGet(request);
+    });
+
+    server.on("/bus-history", HTTP_POST, [this](AsyncWebServerRequest *request) {
+        this->handleBusHistoryPost(request);
+    });
+
+    // Serve the bus history config UI page from LittleFS.
+    server.on("/bus-history-config", HTTP_GET, [](AsyncWebServerRequest *request) {
+        if (LittleFS.exists("/bus_history_config.html")) {
+            request->send(LittleFS, "/bus_history_config.html", "text/html");
+        } else {
+            request->send(404, "text/plain", "Bus history config page not found");
+        }
     });
 
     server.begin();
@@ -372,4 +394,46 @@ void NetworkManager::handleDiscoveryPost(AsyncWebServerRequest *request) {
         discovery_->setBroadcastInterval((uint32_t)bStr.toInt());
     }
     handleDiscoveryGet(request);
+}
+
+// ---------------------------------------------------------------------------
+// /bus-history  GET — return current config + allocated sizes + free heap
+// /bus-history  POST — update config (form params), persist, reallocate
+// ---------------------------------------------------------------------------
+
+void NetworkManager::handleBusHistoryGet(AsyncWebServerRequest *request) {
+    if (!busHistory_) {
+        request->send(503, "application/json",
+                      "{\"error\":\"Bus history not configured\"}");
+        return;
+    }
+    std::string json = busHistory_->configToJson();
+    AsyncResponseStream *resp = request->beginResponseStream("application/json");
+    resp->print(json.c_str());
+    request->send(resp);
+}
+
+void NetworkManager::handleBusHistoryPost(AsyncWebServerRequest *request) {
+    if (!busHistory_) {
+        request->send(503, "application/json",
+                      "{\"error\":\"Bus history not configured\"}");
+        return;
+    }
+    mcp::BusHistoryConfig cfg = busHistory_->getConfig();
+
+    auto applyUint = [&](const char* key, uint32_t& field) {
+        if (request->hasParam(key, true)) {
+            field = (uint32_t)request->getParam(key, true)->value().toInt();
+        }
+    };
+    applyUint("canFrameCount",     cfg.canFrameCount);
+    applyUint("nmeaLineCount",     cfg.nmeaLineCount);
+    applyUint("nmea2000Count",     cfg.nmea2000Count);
+    applyUint("obdiiCount",        cfg.obdiiCount);
+    applyUint("ramBudgetBytes",    cfg.ramBudgetBytes);
+    applyUint("safetyMarginBytes", cfg.safetyMarginBytes);
+
+    busHistory_->setConfig(cfg); // persist, reallocate, announces via callback
+
+    handleBusHistoryGet(request); // return updated status
 }

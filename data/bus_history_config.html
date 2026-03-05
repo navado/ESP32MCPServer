@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bus History Configuration</title>
+<style>
+  body { font-family: sans-serif; max-width: 700px; margin: 2rem auto; padding: 0 1rem; color: #222; }
+  h1   { font-size: 1.4rem; border-bottom: 2px solid #0077cc; padding-bottom: .4rem; }
+  h2   { font-size: 1.1rem; margin-top: 1.6rem; color: #0055aa; }
+  table { border-collapse: collapse; width: 100%; margin-bottom: 1rem; }
+  td, th { padding: .35rem .6rem; border: 1px solid #ccc; font-size: .9rem; }
+  th   { background: #f0f4ff; text-align: left; }
+  .ro  { background: #f9f9f9; color: #555; }
+  .hint { font-size: .78rem; color: #777; }
+  input[type=number] { width: 120px; padding: .3rem; border: 1px solid #aaa; border-radius: 3px; }
+  button { padding: .45rem 1.2rem; border: none; border-radius: 4px; cursor: pointer;
+           font-size: .95rem; }
+  #btnApply  { background: #0077cc; color: #fff; margin-right: .5rem; }
+  #btnAuto   { background: #4caf50; color: #fff; }
+  #btnApply:hover { background: #005fa3; }
+  #btnAuto:hover  { background: #388e3c; }
+  #status { margin-top: .8rem; padding: .5rem .8rem; border-radius: 4px; display: none; }
+  .ok   { background: #e8f5e9; color: #2e7d32; }
+  .err  { background: #fdecea; color: #c62828; }
+  .bar-bg { background: #e0e0e0; border-radius: 4px; height: 10px; }
+  .bar-fg { background: #0077cc; border-radius: 4px; height: 10px; transition: width .3s; }
+  .ram-label { font-size: .78rem; color: #555; margin-top: .2rem; }
+</style>
+</head>
+<body>
+
+<h1>Bus History Configuration</h1>
+<p class="hint">Ring buffers hold the most recent messages for each bus type.
+When full, the oldest entry is overwritten.
+Set a count to <strong>0</strong> to let the device auto-compute from the RAM budget.</p>
+
+<!-- ── RAM budget ─────────────────────────────────────────────────────── -->
+<h2>RAM Budget</h2>
+<div id="ramBar"><div class="bar-bg"><div class="bar-fg" id="ramUsedBar" style="width:0%"></div></div>
+<div class="ram-label" id="ramLabel">Loading…</div></div>
+
+<table>
+  <tr><th>Parameter</th><th>Value</th><th>Notes</th></tr>
+  <tr>
+    <td>Total budget (bytes)</td>
+    <td><input type="number" id="ramBudgetBytes" min="0" step="4096"></td>
+    <td class="hint">0 = use free heap minus safety margin</td>
+  </tr>
+  <tr>
+    <td>Safety margin (bytes)</td>
+    <td><input type="number" id="safetyMarginBytes" min="4096" step="4096"></td>
+    <td class="hint">Always keep this much heap free (default 65536)</td>
+  </tr>
+</table>
+
+<!-- ── Per-type counts ─────────────────────────────────────────────────── -->
+<h2>Per-type Counts <span class="hint">(0 = auto from budget)</span></h2>
+<table>
+  <tr><th>Buffer</th><th>Configured count</th><th>Allocated</th><th>~Bytes/msg</th></tr>
+  <tr>
+    <td>CAN frames</td>
+    <td><input type="number" id="canFrameCount" min="0" step="10"></td>
+    <td class="ro" id="allocCan">—</td>
+    <td class="ro" id="bpCan">—</td>
+  </tr>
+  <tr>
+    <td>NMEA 0183 lines</td>
+    <td><input type="number" id="nmeaLineCount" min="0" step="10"></td>
+    <td class="ro" id="allocNmea">—</td>
+    <td class="ro" id="bpNmea">—</td>
+  </tr>
+  <tr>
+    <td>NMEA 2000 messages</td>
+    <td><input type="number" id="nmea2000Count" min="0" step="10"></td>
+    <td class="ro" id="allocNmea2000">—</td>
+    <td class="ro" id="bpNmea2000">—</td>
+  </tr>
+  <tr>
+    <td>OBD-II records</td>
+    <td><input type="number" id="obdiiCount" min="0" step="10"></td>
+    <td class="ro" id="allocObdii">—</td>
+    <td class="ro" id="bpObdii">—</td>
+  </tr>
+</table>
+
+<button id="btnApply" onclick="applyConfig()">Apply &amp; Save</button>
+<button id="btnAuto"  onclick="setAuto()">Reset to Auto</button>
+<div id="status"></div>
+
+<!-- ── Current free heap ──────────────────────────────────────────────── -->
+<h2>Device Status</h2>
+<table>
+  <tr><th>Free heap (bytes)</th><td class="ro" id="freeHeap">—</td></tr>
+  <tr><th>Total allocated (bytes)</th><td class="ro" id="totalAlloc">—</td></tr>
+</table>
+
+<script>
+const FIELDS = ['ramBudgetBytes','safetyMarginBytes',
+                'canFrameCount','nmeaLineCount','nmea2000Count','obdiiCount'];
+
+async function load() {
+  try {
+    const r = await fetch('/bus-history');
+    const d = await r.json();
+    populate(d);
+  } catch(e) { showStatus('Failed to load: ' + e, false); }
+}
+
+function populate(d) {
+  const cfg = d.configured || {};
+  const alloc = d.allocated || {};
+
+  for (const k of FIELDS) {
+    const el = document.getElementById(k);
+    if (el) el.value = cfg[k] !== undefined ? cfg[k] : 0;
+  }
+
+  document.getElementById('allocCan').textContent      = alloc.canFrameCount   ?? '—';
+  document.getElementById('allocNmea').textContent     = alloc.nmeaLineCount   ?? '—';
+  document.getElementById('allocNmea2000').textContent = alloc.nmea2000Count   ?? '—';
+  document.getElementById('allocObdii').textContent    = alloc.obdiiCount      ?? '—';
+
+  document.getElementById('bpCan').textContent      = d.bytesPerCan      ?? '—';
+  document.getElementById('bpNmea').textContent     = d.bytesPerNmea     ?? '—';
+  document.getElementById('bpNmea2000').textContent = d.bytesPerNmea2000 ?? '—';
+  document.getElementById('bpObdii').textContent    = d.bytesPerObdii    ?? '—';
+
+  const freeHeap = d.freeHeapBytes ?? 0;
+  document.getElementById('freeHeap').textContent = freeHeap.toLocaleString();
+
+  const totalAlloc =
+    (alloc.canFrameCount   ?? 0) * (d.bytesPerCan      ?? 0) +
+    (alloc.nmeaLineCount   ?? 0) * (d.bytesPerNmea     ?? 0) +
+    (alloc.nmea2000Count   ?? 0) * (d.bytesPerNmea2000 ?? 0) +
+    (alloc.obdiiCount      ?? 0) * (d.bytesPerObdii    ?? 0);
+  document.getElementById('totalAlloc').textContent = totalAlloc.toLocaleString();
+
+  // RAM usage bar: allocated / (allocated + freeHeap)
+  const total = totalAlloc + freeHeap;
+  const pct = total > 0 ? Math.min(100, Math.round(totalAlloc / total * 100)) : 0;
+  document.getElementById('ramUsedBar').style.width = pct + '%';
+  document.getElementById('ramLabel').textContent =
+    `History buffers: ${(totalAlloc/1024).toFixed(1)} KB  |  ` +
+    `Free heap: ${(freeHeap/1024).toFixed(1)} KB  |  ${pct}% used by history`;
+}
+
+async function applyConfig() {
+  const params = new URLSearchParams();
+  for (const k of FIELDS) {
+    const el = document.getElementById(k);
+    if (el) params.append(k, el.value);
+  }
+  try {
+    const r = await fetch('/bus-history', { method: 'POST', body: params,
+                           headers: {'Content-Type': 'application/x-www-form-urlencoded'} });
+    const d = await r.json();
+    populate(d);
+    showStatus('Configuration saved and applied.', true);
+  } catch(e) { showStatus('Save failed: ' + e, false); }
+}
+
+function setAuto() {
+  document.getElementById('ramBudgetBytes').value  = 0;
+  document.getElementById('safetyMarginBytes').value = 65536;
+  document.getElementById('canFrameCount').value   = 0;
+  document.getElementById('nmeaLineCount').value   = 0;
+  document.getElementById('nmea2000Count').value   = 0;
+  document.getElementById('obdiiCount').value      = 0;
+}
+
+function showStatus(msg, ok) {
+  const el = document.getElementById('status');
+  el.textContent = msg;
+  el.className = ok ? 'ok' : 'err';
+  el.style.display = 'block';
+  setTimeout(() => { el.style.display = 'none'; }, 4000);
+}
+
+load();
+setInterval(load, 10000); // refresh every 10 s to keep free-heap current
+</script>
+</body>
+</html>

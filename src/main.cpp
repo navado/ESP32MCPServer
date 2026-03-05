@@ -8,6 +8,7 @@
 #include "I2CInterface.h"
 #include "MetricsSystem.h"
 #include "DiscoveryManager.h"
+#include "BusHistory.h"
 
 // ---------------------------------------------------------------------------
 // Minimal ESP32 I2C implementation (wraps Arduino Wire library)
@@ -134,6 +135,72 @@ void setup() {
         Serial.println("LittleFS Mount Failed");
         return;
     }
+
+    // Initialise bus history ring buffers (loads config from LittleFS; allocates
+    // from free heap if no explicit sizes are configured).
+    BUS_HISTORY.begin();
+    // Wire the announce callback so that a config change re-advertises
+    // capabilities to LAN clients immediately.
+    BUS_HISTORY.setAnnounceCb([&]() { discoveryManager.announceCapabilityChange(); });
+    // Give NetworkManager access for the /bus-history HTTP endpoints.
+    networkManager.setBusHistory(&BUS_HISTORY);
+    // Give DiscoveryManager a way to embed history info in capability beacons.
+    discoveryManager.setHistoryInfoCb([]() -> std::string {
+        return BUS_HISTORY.configToJson();
+    });
+
+    // Register bus/history/* MCP handlers.
+    mcpServer.registerMethodHandler("bus/history/read",
+        [](uint8_t, uint32_t id, const JsonObject& p) -> std::string {
+            std::string type = "can";
+            if (p["type"].is<const char*>()) type = p["type"].as<const char*>();
+            uint32_t limit = p["limit"] | 0u;
+
+            if (type == "can")      return BUS_HISTORY.canSnapshotJson(id, limit);
+            if (type == "nmea")     return BUS_HISTORY.nmeaSnapshotJson(id, limit);
+            if (type == "nmea2000") return BUS_HISTORY.nmea2000SnapshotJson(id, limit);
+            if (type == "obdii")    return BUS_HISTORY.obdiiSnapshotJson(id, limit);
+
+            // Unknown type — return an error.
+            JsonDocument doc;
+            doc["jsonrpc"] = "2.0";
+            doc["id"]      = id;
+            doc["error"]["code"]    = -32602;
+            doc["error"]["message"] = "Unknown history type; use can|nmea|nmea2000|obdii";
+            std::string out; serializeJson(doc, out); return out;
+        });
+
+    mcpServer.registerMethodHandler("bus/history/config/get",
+        [](uint8_t, uint32_t id, const JsonObject&) -> std::string {
+            std::string cfg = BUS_HISTORY.configToJson();
+            // Wrap in a JSON-RPC result envelope.
+            std::string out = "{\"jsonrpc\":\"2.0\",\"id\":";
+            char tmp[16]; std::snprintf(tmp, sizeof(tmp), "%u", (unsigned)id);
+            out += tmp; out += ",\"result\":"; out += cfg; out += "}";
+            return out;
+        });
+
+    mcpServer.registerMethodHandler("bus/history/config/set",
+        [](uint8_t, uint32_t id, const JsonObject& p) -> std::string {
+            mcp::BusHistoryConfig cfg = BUS_HISTORY.getConfig();
+            auto applyUint = [&](const char* key, uint32_t& field) {
+                if (p[key].is<unsigned int>() || p[key].is<int>())
+                    field = p[key].as<uint32_t>();
+            };
+            applyUint("canFrameCount",     cfg.canFrameCount);
+            applyUint("nmeaLineCount",     cfg.nmeaLineCount);
+            applyUint("nmea2000Count",     cfg.nmea2000Count);
+            applyUint("obdiiCount",        cfg.obdiiCount);
+            applyUint("ramBudgetBytes",    cfg.ramBudgetBytes);
+            applyUint("safetyMarginBytes", cfg.safetyMarginBytes);
+            BUS_HISTORY.setConfig(cfg); // persists + reallocates + announces
+
+            std::string cfgJson = BUS_HISTORY.configToJson();
+            std::string out = "{\"jsonrpc\":\"2.0\",\"id\":";
+            char tmp[16]; std::snprintf(tmp, sizeof(tmp), "%u", (unsigned)id);
+            out += tmp; out += ",\"result\":"; out += cfgJson; out += "}";
+            return out;
+        });
 
     // Initialize discovery manager (loads NVS config; hostname derived from MAC
     // if not previously set).  Must be called before networkManager.begin() so

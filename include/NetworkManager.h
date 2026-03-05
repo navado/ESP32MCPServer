@@ -7,9 +7,9 @@
 #include <LittleFS.h>
 #include "RequestQueue.h"
 
-// Forward declaration — avoids pulling ESP32-only headers into every translation
-// unit that includes NetworkManager.h.
+// Forward declarations — avoid pulling ESP32-only headers into every TU.
 class DiscoveryManager;
+namespace mcp { class BusHistory; }
 
 enum class NetworkState {
     INIT,
@@ -52,6 +52,10 @@ public:
     // network connects or disconnects.  Call before begin().
     void setDiscoveryManager(DiscoveryManager* dm);
 
+    // Wire in a BusHistory so the /bus-history endpoint can read/write config.
+    // Call before begin().
+    void setBusHistory(mcp::BusHistory* bh);
+
     // Process one pending network request synchronously (used in tests
     // where the FreeRTOS background task is not running).
     void handleClient();
@@ -73,7 +77,8 @@ private:
     uint8_t connectAttempts;
     uint32_t lastConnectAttempt;
     NetworkCredentials credentials;
-    DiscoveryManager* discovery_ = nullptr;
+    DiscoveryManager*  discovery_   = nullptr;
+    mcp::BusHistory*   busHistory_  = nullptr;
 
     void setupWebServer();
     void handleRequest(const NetworkRequest& request);
@@ -94,6 +99,8 @@ private:
     void handleStatus(AsyncWebServerRequest *request);
     void handleDiscoveryGet(AsyncWebServerRequest *request);
     void handleDiscoveryPost(AsyncWebServerRequest *request);
+    void handleBusHistoryGet(AsyncWebServerRequest *request);
+    void handleBusHistoryPost(AsyncWebServerRequest *request);
     void onWebSocketEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
                          AwsEventType type, void* arg, uint8_t* data, size_t len);
     
