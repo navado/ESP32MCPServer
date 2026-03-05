@@ -152,13 +152,20 @@ std::string BusReadResult::toJson(ParseMode mode) const {
         for (size_t i = 0; i < parsedOBDII.size(); ++i) {
             if (i) j += ",";
             const auto& d = parsedOBDII[i];
-            j += "{\"pid\":";
-            std::snprintf(tmp, sizeof(tmp), "%u,\"name\":", d.pid);
+            std::snprintf(tmp, sizeof(tmp),
+                          "{\"service\":%u,\"pid\":%u,\"name\":",
+                          static_cast<unsigned>(d.service),
+                          static_cast<unsigned>(d.pid));
             j += tmp;
             appendJsonString(j, d.name);
-            std::snprintf(tmp, sizeof(tmp), ",\"value\":%.3f,\"unit\":", d.value);
+            std::snprintf(tmp, sizeof(tmp), ",\"value\":%.6g,\"unit\":", d.value);
             j += tmp;
             appendJsonString(j, d.unit);
+            if (!d.unit2.empty()) {
+                std::snprintf(tmp, sizeof(tmp), ",\"value2\":%.6g,\"unit2\":", d.value2);
+                j += tmp;
+                appendJsonString(j, d.unit2);
+            }
             j += ",\"valid\":";
             j += (d.valid ? "true" : "false");
             j += "}";
