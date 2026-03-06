@@ -163,7 +163,7 @@ public:
     std::string nmea2000SnapshotJson(uint32_t requestId, uint32_t limit = 0) const;
     std::string obdiiSnapshotJson   (uint32_t requestId, uint32_t limit = 0) const;
 
-    // Approximate per-item heap cost (used for RAM budget calculations).
+    // Compute per-item heap cost (used for RAM budget calculations).
     static constexpr size_t BYTES_PER_CAN      = sizeof(CANFrame);
     static constexpr size_t BYTES_PER_NMEA     = 100; // avg sentence + std::string overhead
     static constexpr size_t BYTES_PER_NMEA2000 = sizeof(NMEA2000Data) + 32;
@@ -174,6 +174,11 @@ public:
 
     // Query platform free heap (mockable via NATIVE_TEST).
     static uint32_t freeHeapBytes();
+
+    // Compute per-type capacities from a total byte budget split equally.
+    // Public so tests can verify the allocation arithmetic directly.
+    static BusHistoryConfig autoConfig(uint32_t budgetBytes,
+                                       uint32_t safetyMarginBytes);
 
 private:
     BusHistory()  = default;
@@ -192,10 +197,6 @@ private:
     void loadConfig();
     void saveConfig() const;
     void allocateBuffers(const BusHistoryConfig& cfg);
-
-    // Compute per-type capacities from a total byte budget split equally.
-    static BusHistoryConfig autoConfig(uint32_t budgetBytes,
-                                       uint32_t safetyMarginBytes);
 
     // JSON helpers — hand-built strings, no ArduinoJson, to avoid heap spikes.
     static std::string escapeJsonString(const std::string& s);

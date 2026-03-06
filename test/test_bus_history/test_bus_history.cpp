@@ -3,6 +3,7 @@
 
 #include <unity.h>
 #include "BusHistory.h"
+#include <cstring>
 #include <string>
 #include <vector>
 
