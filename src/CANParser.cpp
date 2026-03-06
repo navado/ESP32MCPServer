@@ -93,73 +93,681 @@ OBDIIData CANParser::decodeOBDPID(uint8_t service, uint8_t pid,
     d.pid     = pid;
     d.valid   = true;
 
-    // Service 01 — show current data
+    // -----------------------------------------------------------------------
+    // Service 01 — show current powertrain data  (SAE J1979 / ISO 15031-5)
+    // abcd[0..4] = bytes A..E from the CAN frame (up to 5 data bytes).
+    // -----------------------------------------------------------------------
     if (service == 0x01) {
         switch (pid) {
-        case 0x04: // Calculated engine load
+        // ── Supported PID bitmasks ─────────────────────────────────────────
+        case 0x00:
+            d.name  = "Supported PIDs 01-20";
+            d.value = static_cast<double>(
+                (static_cast<uint32_t>(abcd[0]) << 24) |
+                (static_cast<uint32_t>(abcd[1]) << 16) |
+                (static_cast<uint32_t>(abcd[2]) <<  8) |
+                 static_cast<uint32_t>(abcd[3]));
+            d.unit  = "bitmask";
+            break;
+        case 0x20:
+            d.name  = "Supported PIDs 21-40";
+            d.value = static_cast<double>(
+                (static_cast<uint32_t>(abcd[0]) << 24) |
+                (static_cast<uint32_t>(abcd[1]) << 16) |
+                (static_cast<uint32_t>(abcd[2]) <<  8) |
+                 static_cast<uint32_t>(abcd[3]));
+            d.unit  = "bitmask";
+            break;
+        case 0x40:
+            d.name  = "Supported PIDs 41-60";
+            d.value = static_cast<double>(
+                (static_cast<uint32_t>(abcd[0]) << 24) |
+                (static_cast<uint32_t>(abcd[1]) << 16) |
+                (static_cast<uint32_t>(abcd[2]) <<  8) |
+                 static_cast<uint32_t>(abcd[3]));
+            d.unit  = "bitmask";
+            break;
+        case 0x60:
+            d.name  = "Supported PIDs 61-80";
+            d.value = static_cast<double>(
+                (static_cast<uint32_t>(abcd[0]) << 24) |
+                (static_cast<uint32_t>(abcd[1]) << 16) |
+                (static_cast<uint32_t>(abcd[2]) <<  8) |
+                 static_cast<uint32_t>(abcd[3]));
+            d.unit  = "bitmask";
+            break;
+        case 0x80:
+            d.name  = "Supported PIDs 81-A0";
+            d.value = static_cast<double>(
+                (static_cast<uint32_t>(abcd[0]) << 24) |
+                (static_cast<uint32_t>(abcd[1]) << 16) |
+                (static_cast<uint32_t>(abcd[2]) <<  8) |
+                 static_cast<uint32_t>(abcd[3]));
+            d.unit  = "bitmask";
+            break;
+        case 0xA0:
+            d.name  = "Supported PIDs A1-C0";
+            d.value = static_cast<double>(
+                (static_cast<uint32_t>(abcd[0]) << 24) |
+                (static_cast<uint32_t>(abcd[1]) << 16) |
+                (static_cast<uint32_t>(abcd[2]) <<  8) |
+                 static_cast<uint32_t>(abcd[3]));
+            d.unit  = "bitmask";
+            break;
+        case 0xC0:
+            d.name  = "Supported PIDs C1-E0";
+            d.value = static_cast<double>(
+                (static_cast<uint32_t>(abcd[0]) << 24) |
+                (static_cast<uint32_t>(abcd[1]) << 16) |
+                (static_cast<uint32_t>(abcd[2]) <<  8) |
+                 static_cast<uint32_t>(abcd[3]));
+            d.unit  = "bitmask";
+            break;
+
+        // ── Monitor / status ───────────────────────────────────────────────
+        case 0x01:
+            d.name  = "Monitor Status";   // bit 7 of A = MIL on/off
+            d.value = abcd[0];
+            d.unit  = "";
+            break;
+        case 0x41:
+            d.name  = "Monitor Status Drive Cycle";
+            d.value = abcd[0];
+            d.unit  = "";
+            break;
+
+        // ── Fuel system ────────────────────────────────────────────────────
+        case 0x03:
+            d.name  = "Fuel System Status";
+            d.value = abcd[0];
+            d.unit  = "";
+            break;
+        case 0x06: // Short term fuel trim — bank 1  (A/1.28 - 100)%
+            d.name  = "STFT Bank 1";
+            d.value = (abcd[0] / 1.28) - 100.0;
+            d.unit  = "%";
+            break;
+        case 0x07: // Long term fuel trim — bank 1
+            d.name  = "LTFT Bank 1";
+            d.value = (abcd[0] / 1.28) - 100.0;
+            d.unit  = "%";
+            break;
+        case 0x08: // Short term fuel trim — bank 2
+            d.name  = "STFT Bank 2";
+            d.value = (abcd[0] / 1.28) - 100.0;
+            d.unit  = "%";
+            break;
+        case 0x09: // Long term fuel trim — bank 2
+            d.name  = "LTFT Bank 2";
+            d.value = (abcd[0] / 1.28) - 100.0;
+            d.unit  = "%";
+            break;
+        case 0x0A: // Fuel pressure (gauge, relative to atmospheric)  A*3 kPa
+            d.name  = "Fuel Pressure";
+            d.value = abcd[0] * 3.0;
+            d.unit  = "kPa";
+            break;
+        case 0x22: // Fuel rail pressure relative to manifold vacuum  (AB)*0.079 kPa
+            d.name  = "Fuel Rail Pressure";
+            d.value = ((static_cast<uint16_t>(abcd[0]) << 8) | abcd[1]) * 0.079;
+            d.unit  = "kPa";
+            break;
+        case 0x23: // Fuel rail gauge pressure  (AB)*10 kPa
+            d.name  = "Fuel Rail Gauge Pressure";
+            d.value = ((static_cast<uint16_t>(abcd[0]) << 8) | abcd[1]) * 10.0;
+            d.unit  = "kPa";
+            break;
+        case 0x2F: // Fuel tank level  A/2.55 %
+            d.name  = "Fuel Level";
+            d.value = abcd[0] / 2.55;
+            d.unit  = "%";
+            break;
+        case 0x51:
+            d.name  = "Fuel Type";
+            d.value = abcd[0];
+            d.unit  = "";
+            break;
+        case 0x52: // Ethanol fuel %  A/2.55
+            d.name  = "Ethanol %";
+            d.value = abcd[0] / 2.55;
+            d.unit  = "%";
+            break;
+        case 0x59: // Fuel rail absolute pressure  (AB)*10 kPa
+            d.name  = "Fuel Rail Abs Pressure";
+            d.value = ((static_cast<uint16_t>(abcd[0]) << 8) | abcd[1]) * 10.0;
+            d.unit  = "kPa";
+            break;
+        case 0x5E: // Engine fuel rate  (AB)*0.05 L/h
+            d.name  = "Fuel Rate";
+            d.value = ((static_cast<uint16_t>(abcd[0]) << 8) | abcd[1]) * 0.05;
+            d.unit  = "L/h";
+            break;
+
+        // ── Engine ─────────────────────────────────────────────────────────
+        case 0x04: // Calculated engine load  A/2.55 %
             d.name  = "Engine Load";
             d.value = abcd[0] / 2.55;
             d.unit  = "%";
             break;
-        case 0x05: // Engine coolant temperature
+        case 0x05: // Engine coolant temperature  A-40 °C
             d.name  = "Coolant Temp";
             d.value = static_cast<int>(abcd[0]) - 40;
-            d.unit  = "°C";
+            d.unit  = "\xc2\xb0""C";
             break;
-        case 0x0C: // Engine RPM
+        case 0x0B: // Intake manifold absolute pressure  A kPa
+            d.name  = "MAP";
+            d.value = abcd[0];
+            d.unit  = "kPa";
+            break;
+        case 0x0C: // Engine RPM  (AB)/4 rpm
             d.name  = "Engine RPM";
-            d.value = ((abcd[0] << 8) | abcd[1]) / 4.0;
+            d.value = ((static_cast<uint16_t>(abcd[0]) << 8) | abcd[1]) / 4.0;
             d.unit  = "rpm";
             break;
-        case 0x0D: // Vehicle speed
+        case 0x0E: // Timing advance  A/2-64 °
+            d.name  = "Timing Advance";
+            d.value = (abcd[0] / 2.0) - 64.0;
+            d.unit  = "\xc2\xb0";
+            break;
+        case 0x0F: // Intake air temperature  A-40 °C
+            d.name  = "Intake Air Temp";
+            d.value = static_cast<int>(abcd[0]) - 40;
+            d.unit  = "\xc2\xb0""C";
+            break;
+        case 0x10: // Mass air flow rate  (AB)/100 g/s
+            d.name  = "MAF Rate";
+            d.value = ((static_cast<uint16_t>(abcd[0]) << 8) | abcd[1]) / 100.0;
+            d.unit  = "g/s";
+            break;
+        case 0x11: // Throttle position  A/2.55 %
+            d.name  = "Throttle Position";
+            d.value = abcd[0] / 2.55;
+            d.unit  = "%";
+            break;
+        case 0x43: // Absolute load  (AB)/2.55 %
+            d.name  = "Absolute Load";
+            d.value = ((static_cast<uint16_t>(abcd[0]) << 8) | abcd[1]) / 2.55;
+            d.unit  = "%";
+            break;
+        case 0x44: // Commanded air-fuel equivalence ratio  (AB)/32768
+            d.name  = "Commanded Lambda";
+            d.value = ((static_cast<uint16_t>(abcd[0]) << 8) | abcd[1]) / 32768.0;
+            d.unit  = "lambda";
+            break;
+        case 0x5C: // Engine oil temperature  A-40 °C
+            d.name  = "Oil Temp";
+            d.value = static_cast<int>(abcd[0]) - 40;
+            d.unit  = "\xc2\xb0""C";
+            break;
+        case 0x5D: // Fuel injection timing  (AB)/128-210 °
+            d.name  = "Injection Timing";
+            d.value = ((static_cast<uint16_t>(abcd[0]) << 8) | abcd[1]) / 128.0 - 210.0;
+            d.unit  = "\xc2\xb0";
+            break;
+
+        // ── Torque (service 01 0x61-0x64) ─────────────────────────────────
+        case 0x61: // Driver's demand engine % torque  A-125 %
+            d.name  = "Driver Demand Torque";
+            d.value = static_cast<int>(abcd[0]) - 125;
+            d.unit  = "%";
+            break;
+        case 0x62: // Actual engine % torque  A-125 %
+            d.name  = "Actual Engine Torque";
+            d.value = static_cast<int>(abcd[0]) - 125;
+            d.unit  = "%";
+            break;
+        case 0x63: // Engine reference torque  (AB) Nm
+            d.name  = "Reference Torque";
+            d.value = (static_cast<uint16_t>(abcd[0]) << 8) | abcd[1];
+            d.unit  = "Nm";
+            break;
+        case 0x64: // Engine % torque data (5 points; A = idle)  A-125 %
+            d.name  = "Engine Torque Data";
+            d.value = static_cast<int>(abcd[0]) - 125;
+            d.unit  = "%";
+            break;
+
+        // ── Vehicle dynamics ───────────────────────────────────────────────
+        case 0x0D: // Vehicle speed  A km/h
             d.name  = "Vehicle Speed";
             d.value = abcd[0];
             d.unit  = "km/h";
             break;
-        case 0x0F: // Intake air temperature
-            d.name  = "Intake Air Temp";
-            d.value = static_cast<int>(abcd[0]) - 40;
-            d.unit  = "°C";
-            break;
-        case 0x10: // Mass air flow sensor
-            d.name  = "MAF Rate";
-            d.value = ((abcd[0] << 8) | abcd[1]) / 100.0;
-            d.unit  = "g/s";
-            break;
-        case 0x11: // Throttle position
-            d.name  = "Throttle Position";
+
+        // ── Throttle / pedal positions ─────────────────────────────────────
+        case 0x45: // Relative throttle position  A/2.55 %
+            d.name  = "Relative Throttle";
             d.value = abcd[0] / 2.55;
             d.unit  = "%";
+            break;
+        case 0x47: // Absolute throttle position B
+            d.name  = "Throttle Position B";
+            d.value = abcd[0] / 2.55;
+            d.unit  = "%";
+            break;
+        case 0x48: // Absolute throttle position C
+            d.name  = "Throttle Position C";
+            d.value = abcd[0] / 2.55;
+            d.unit  = "%";
+            break;
+        case 0x49: // Accelerator pedal position D
+            d.name  = "Accel Pedal D";
+            d.value = abcd[0] / 2.55;
+            d.unit  = "%";
+            break;
+        case 0x4A: // Accelerator pedal position E
+            d.name  = "Accel Pedal E";
+            d.value = abcd[0] / 2.55;
+            d.unit  = "%";
+            break;
+        case 0x4B: // Accelerator pedal position F
+            d.name  = "Accel Pedal F";
+            d.value = abcd[0] / 2.55;
+            d.unit  = "%";
+            break;
+        case 0x4C: // Commanded throttle actuator
+            d.name  = "Commanded Throttle";
+            d.value = abcd[0] / 2.55;
+            d.unit  = "%";
+            break;
+        case 0x5A: // Relative accelerator pedal position
+            d.name  = "Rel Accel Pedal";
+            d.value = abcd[0] / 2.55;
+            d.unit  = "%";
+            break;
+
+        // ── Temperatures ───────────────────────────────────────────────────
+        case 0x46: // Ambient air temperature  A-40 °C
+            d.name  = "Ambient Temp";
+            d.value = static_cast<int>(abcd[0]) - 40;
+            d.unit  = "\xc2\xb0""C";
+            break;
+        case 0x33: // Absolute barometric pressure  A kPa
+            d.name  = "Barometric Pressure";
+            d.value = abcd[0];
+            d.unit  = "kPa";
+            break;
+        case 0x67: // Engine coolant temperature — two sensors (B,C are sensors 1,2)
+            d.name   = "Coolant Temp 2";
+            d.value  = static_cast<int>(abcd[1]) - 40;
+            d.unit   = "\xc2\xb0""C";
+            d.value2 = static_cast<int>(abcd[2]) - 40;
+            d.unit2  = "\xc2\xb0""C S2";
+            break;
+        case 0x68: // Intake air temperature sensor (B = sensor 1)
+            d.name  = "Intake Air Temp 2";
+            d.value = static_cast<int>(abcd[1]) - 40;
+            d.unit  = "\xc2\xb0""C";
+            break;
+        case 0x77: // Charge air cooler temperature (B = sensor 1)
+            d.name  = "Charge Air Cooler Temp";
+            d.value = static_cast<int>(abcd[1]) - 40;
+            d.unit  = "\xc2\xb0""C";
+            break;
+
+        // ── Catalyst temperatures 0x3C-0x3F  (AB)/10-40 °C ───────────────
+        case 0x3C:
+            d.name  = "Catalyst Temp B1S1";
+            d.value = ((static_cast<uint16_t>(abcd[0]) << 8) | abcd[1]) / 10.0 - 40.0;
+            d.unit  = "\xc2\xb0""C";
+            break;
+        case 0x3D:
+            d.name  = "Catalyst Temp B2S1";
+            d.value = ((static_cast<uint16_t>(abcd[0]) << 8) | abcd[1]) / 10.0 - 40.0;
+            d.unit  = "\xc2\xb0""C";
+            break;
+        case 0x3E:
+            d.name  = "Catalyst Temp B1S2";
+            d.value = ((static_cast<uint16_t>(abcd[0]) << 8) | abcd[1]) / 10.0 - 40.0;
+            d.unit  = "\xc2\xb0""C";
+            break;
+        case 0x3F:
+            d.name  = "Catalyst Temp B2S2";
+            d.value = ((static_cast<uint16_t>(abcd[0]) << 8) | abcd[1]) / 10.0 - 40.0;
+            d.unit  = "\xc2\xb0""C";
+            break;
+
+        // ── Exhaust gas temperature banks (B<<8|C)/10-40 for sensor 1,
+        //    (D<<8|E)/10-40 for sensor 2 ─────────────────────────────────
+        case 0x78: // EGT bank 1
+            d.name   = "EGT Bank 1 S1";
+            d.value  = ((static_cast<uint16_t>(abcd[1]) << 8) | abcd[2]) / 10.0 - 40.0;
+            d.unit   = "\xc2\xb0""C";
+            d.value2 = ((static_cast<uint16_t>(abcd[3]) << 8) | abcd[4]) / 10.0 - 40.0;
+            d.unit2  = "\xc2\xb0""C S2";
+            break;
+        case 0x79: // EGT bank 2
+            d.name   = "EGT Bank 2 S1";
+            d.value  = ((static_cast<uint16_t>(abcd[1]) << 8) | abcd[2]) / 10.0 - 40.0;
+            d.unit   = "\xc2\xb0""C";
+            d.value2 = ((static_cast<uint16_t>(abcd[3]) << 8) | abcd[4]) / 10.0 - 40.0;
+            d.unit2  = "\xc2\xb0""C S2";
+            break;
+        case 0x7C: // DPF temperature bank 1
+            d.name  = "DPF Temp B1";
+            d.value = ((static_cast<uint16_t>(abcd[1]) << 8) | abcd[2]) / 10.0 - 40.0;
+            d.unit  = "\xc2\xb0""C";
+            break;
+
+        // ── O2 sensors 0x14-0x1B: voltage (A/200 V) + STFT (B/1.28-100%)
+        //    0xFF in B means fuel trim not supported ─────────────────────
+        case 0x14:
+        case 0x15:
+        case 0x16:
+        case 0x17:
+        case 0x18:
+        case 0x19:
+        case 0x1A:
+        case 0x1B: {
+            static const char* o2n[] = {
+                "O2 S1B1","O2 S2B1","O2 S3B1","O2 S4B1",
+                "O2 S1B2","O2 S2B2","O2 S3B2","O2 S4B2"
+            };
+            d.name  = o2n[pid - 0x14];
+            d.value = abcd[0] / 200.0;
+            d.unit  = "V";
+            if (abcd[1] != 0xFF) {
+                d.value2 = (abcd[1] / 1.28) - 100.0;
+                d.unit2  = "% STFT";
+            }
+            break;
+        }
+        // ── O2 sensors 0x24-0x2B: equivalence ratio (2/65536*(AB)) + voltage (8/65536*(CD))
+        case 0x24:
+        case 0x25:
+        case 0x26:
+        case 0x27:
+        case 0x28:
+        case 0x29:
+        case 0x2A:
+        case 0x2B: {
+            static const char* o2n[] = {
+                "O2 Lambda S1B1","O2 Lambda S2B1","O2 Lambda S3B1","O2 Lambda S4B1",
+                "O2 Lambda S1B2","O2 Lambda S2B2","O2 Lambda S3B2","O2 Lambda S4B2"
+            };
+            d.name   = o2n[pid - 0x24];
+            d.value  = ((static_cast<uint16_t>(abcd[0]) << 8) | abcd[1]) * (2.0 / 65536.0);
+            d.unit   = "lambda";
+            d.value2 = ((static_cast<uint16_t>(abcd[2]) << 8) | abcd[3]) * (8.0 / 65536.0);
+            d.unit2  = "V";
+            break;
+        }
+        // ── O2 sensors 0x34-0x3B: equivalence ratio + current (CD/256-128 mA)
+        case 0x34:
+        case 0x35:
+        case 0x36:
+        case 0x37:
+        case 0x38:
+        case 0x39:
+        case 0x3A:
+        case 0x3B: {
+            static const char* o2n[] = {
+                "O2 mA S1B1","O2 mA S2B1","O2 mA S3B1","O2 mA S4B1",
+                "O2 mA S1B2","O2 mA S2B2","O2 mA S3B2","O2 mA S4B2"
+            };
+            d.name   = o2n[pid - 0x34];
+            d.value  = ((static_cast<uint16_t>(abcd[0]) << 8) | abcd[1]) * (2.0 / 65536.0);
+            d.unit   = "lambda";
+            d.value2 = static_cast<int16_t>(
+                           (static_cast<uint16_t>(abcd[2]) << 8) | abcd[3]) / 256.0;
+            d.unit2  = "mA";
+            break;
+        }
+
+        // ── Emissions / evap ───────────────────────────────────────────────
+        case 0x12: // Commanded secondary air status
+            d.name  = "Secondary Air Status";
+            d.value = abcd[0];
+            d.unit  = "";
+            break;
+        case 0x13: // O2 sensors present (2-bank encoding)
+            d.name  = "O2 Sensors Present";
+            d.value = abcd[0];
+            d.unit  = "bitmask";
             break;
         case 0x1C: // OBD standards compliance
             d.name  = "OBD Standard";
             d.value = abcd[0];
             d.unit  = "";
             break;
-        case 0x2F: // Fuel tank level
-            d.name  = "Fuel Level";
+        case 0x1D: // O2 sensors present (4-bank encoding)
+            d.name  = "O2 Sensors Present (4-bank)";
+            d.value = abcd[0];
+            d.unit  = "bitmask";
+            break;
+        case 0x1E: // Auxiliary input status (bit 0 = PTO active)
+            d.name  = "Aux Input Status";
+            d.value = abcd[0] & 0x01;
+            d.unit  = "";
+            break;
+        case 0x2C: // Commanded EGR  A/2.55 %
+            d.name  = "Commanded EGR";
             d.value = abcd[0] / 2.55;
             d.unit  = "%";
             break;
-        case 0x33: // Barometric pressure
-            d.name  = "Barometric Pressure";
-            d.value = abcd[0];
+        case 0x2D: // EGR error  A/1.28-100 %
+            d.name  = "EGR Error";
+            d.value = (abcd[0] / 1.28) - 100.0;
+            d.unit  = "%";
+            break;
+        case 0x2E: // Commanded evaporative purge  A/2.55 %
+            d.name  = "Evaporative Purge";
+            d.value = abcd[0] / 2.55;
+            d.unit  = "%";
+            break;
+        case 0x32: // Evap system vapor pressure (signed)  (AB signed)/4 Pa
+            d.name  = "Evap Vapor Pressure";
+            d.value = static_cast<int16_t>(
+                          (static_cast<uint16_t>(abcd[0]) << 8) | abcd[1]) / 4.0;
+            d.unit  = "Pa";
+            break;
+        case 0x53: // Absolute evap system vapor pressure  (AB)/200 kPa
+            d.name  = "Abs Evap Vapor Pressure";
+            d.value = ((static_cast<uint16_t>(abcd[0]) << 8) | abcd[1]) / 200.0;
             d.unit  = "kPa";
             break;
-        case 0x46: // Ambient air temperature
-            d.name  = "Ambient Temp";
-            d.value = static_cast<int>(abcd[0]) - 40;
-            d.unit  = "°C";
+        case 0x54: // Evap vapor pressure 2 (signed)  (AB signed)-32767 Pa
+            d.name  = "Evap Vapor Pressure 2";
+            d.value = static_cast<int16_t>(
+                          (static_cast<uint16_t>(abcd[0]) << 8) | abcd[1]) - 32767.0;
+            d.unit  = "Pa";
             break;
-        default:
-            d.name  = "PID 0x" + [pid]() {
-                char buf[8]; std::snprintf(buf, sizeof(buf), "%02X", pid);
-                return std::string(buf);
-            }();
+        case 0x5F: // Emission requirements to which the vehicle is designed
+            d.name  = "Emission Requirements";
+            d.value = abcd[0];
+            d.unit  = "";
+            break;
+
+        // ── Secondary O2 fuel trims 0x55-0x58: A=bank1or3, B=bank2or4 ───
+        case 0x55:
+            d.name   = "STFT B1&3";
+            d.value  = (abcd[0] / 1.28) - 100.0;
+            d.unit   = "% B1";
+            d.value2 = (abcd[1] / 1.28) - 100.0;
+            d.unit2  = "% B3";
+            break;
+        case 0x56:
+            d.name   = "LTFT B1&3";
+            d.value  = (abcd[0] / 1.28) - 100.0;
+            d.unit   = "% B1";
+            d.value2 = (abcd[1] / 1.28) - 100.0;
+            d.unit2  = "% B3";
+            break;
+        case 0x57:
+            d.name   = "STFT B2&4";
+            d.value  = (abcd[0] / 1.28) - 100.0;
+            d.unit   = "% B2";
+            d.value2 = (abcd[1] / 1.28) - 100.0;
+            d.unit2  = "% B4";
+            break;
+        case 0x58:
+            d.name   = "LTFT B2&4";
+            d.value  = (abcd[0] / 1.28) - 100.0;
+            d.unit   = "% B2";
+            d.value2 = (abcd[1] / 1.28) - 100.0;
+            d.unit2  = "% B4";
+            break;
+
+        // ── DPF / diesel ───────────────────────────────────────────────────
+        case 0x7A: // DPF differential pressure  (AB)*0.01 kPa
+            d.name  = "DPF Diff Pressure";
+            d.value = ((static_cast<uint16_t>(abcd[1]) << 8) | abcd[2]) * 0.01;
+            d.unit  = "kPa";
+            break;
+
+        // ── Boost pressure (B<<8|C)*0.03125 kPa (with bitmask in A) ──────
+        case 0x70:
+            d.name  = "Boost Pressure";
+            d.value = ((static_cast<uint16_t>(abcd[1]) << 8) | abcd[2]) * 0.03125;
+            d.unit  = "kPa";
+            break;
+
+        // ── Miscellaneous ──────────────────────────────────────────────────
+        case 0x1F: // Run time since engine start  (AB) s
+            d.name  = "Engine Run Time";
+            d.value = (static_cast<uint16_t>(abcd[0]) << 8) | abcd[1];
+            d.unit  = "s";
+            break;
+        case 0x21: // Distance traveled with MIL on  (AB) km
+            d.name  = "MIL Distance";
+            d.value = (static_cast<uint16_t>(abcd[0]) << 8) | abcd[1];
+            d.unit  = "km";
+            break;
+        case 0x30: // Warm-ups since codes cleared  A count
+            d.name  = "Warm-ups Since Clear";
+            d.value = abcd[0];
+            d.unit  = "count";
+            break;
+        case 0x31: // Distance since codes cleared  (AB) km
+            d.name  = "Distance Since Clear";
+            d.value = (static_cast<uint16_t>(abcd[0]) << 8) | abcd[1];
+            d.unit  = "km";
+            break;
+        case 0x42: // Control module voltage  (AB)/1000 V
+            d.name  = "Module Voltage";
+            d.value = ((static_cast<uint16_t>(abcd[0]) << 8) | abcd[1]) / 1000.0;
+            d.unit  = "V";
+            break;
+        case 0x4D: // Time run with MIL on  (AB) min
+            d.name  = "MIL Run Time";
+            d.value = (static_cast<uint16_t>(abcd[0]) << 8) | abcd[1];
+            d.unit  = "min";
+            break;
+        case 0x4E: // Time since trouble codes cleared  (AB) min
+            d.name  = "Time Since Clear";
+            d.value = (static_cast<uint16_t>(abcd[0]) << 8) | abcd[1];
+            d.unit  = "min";
+            break;
+        case 0x4F: // Maximum values (lambda, O2 voltage, O2 current, MAP)
+            d.name  = "Max Values";
+            d.value = abcd[0]; // max equivalence ratio * 1
+            d.unit  = "";
+            break;
+        case 0x50: // Maximum air flow rate  A*10 g/s
+            d.name  = "Max MAF Rate";
+            d.value = abcd[0] * 10.0;
+            d.unit  = "g/s";
+            break;
+        case 0x5B: // Hybrid battery pack remaining life  A/2.55 %
+            d.name  = "Hybrid Battery";
+            d.value = abcd[0] / 2.55;
+            d.unit  = "%";
+            break;
+        case 0x6B: // EGR temperature sensor (B = sensor 1)  B-40 °C
+            d.name  = "EGR Temp";
+            d.value = static_cast<int>(abcd[1]) - 40;
+            d.unit  = "\xc2\xb0""C";
+            break;
+        case 0x7F: // Engine run time for AECD  (BCDE) s
+            d.name  = "Engine Run Time AECD";
+            d.value = static_cast<double>(
+                (static_cast<uint32_t>(abcd[1]) << 24) |
+                (static_cast<uint32_t>(abcd[2]) << 16) |
+                (static_cast<uint32_t>(abcd[3]) <<  8) |
+                 static_cast<uint32_t>(abcd[4]));
+            d.unit  = "s";
+            break;
+
+        default: {
+            char buf[8];
+            std::snprintf(buf, sizeof(buf), "%02X", pid);
+            d.name  = std::string("PID 0x") + buf;
             d.value = abcd[0];
             d.unit  = "";
             break;
         }
+        } // switch(pid) service 01
+
+    // -----------------------------------------------------------------------
+    // Service 09 — vehicle information
+    // Most infotypes (VIN, Cal ID, ECU name) require ISO 15765-2 multi-frame
+    // reassembly.  We decode only the single-frame infotypes here.
+    // -----------------------------------------------------------------------
+    } else if (service == 0x09) {
+        switch (pid) {
+        case 0x00: // Supported infotypes bitmask
+            d.name  = "Supported Infotypes";
+            d.value = static_cast<double>(
+                (static_cast<uint32_t>(abcd[0]) << 24) |
+                (static_cast<uint32_t>(abcd[1]) << 16) |
+                (static_cast<uint32_t>(abcd[2]) <<  8) |
+                 static_cast<uint32_t>(abcd[3]));
+            d.unit  = "bitmask";
+            break;
+        case 0x01: // VIN message count
+            d.name  = "VIN Msg Count";
+            d.value = abcd[0];
+            d.unit  = "";
+            break;
+        case 0x03: // Calibration ID message count
+            d.name  = "Cal ID Msg Count";
+            d.value = abcd[0];
+            d.unit  = "";
+            break;
+        case 0x05: // CVN message count
+            d.name  = "CVN Msg Count";
+            d.value = abcd[0];
+            d.unit  = "";
+            break;
+        case 0x06: // Calibration verification number (32-bit, single frame)
+            d.name  = "CVN";
+            d.value = static_cast<double>(
+                (static_cast<uint32_t>(abcd[0]) << 24) |
+                (static_cast<uint32_t>(abcd[1]) << 16) |
+                (static_cast<uint32_t>(abcd[2]) <<  8) |
+                 static_cast<uint32_t>(abcd[3]));
+            d.unit  = "";
+            break;
+        case 0x07: // In-use performance tracking message count
+            d.name  = "IUPT Msg Count";
+            d.value = abcd[0];
+            d.unit  = "";
+            break;
+        case 0x09: // ECU name message count
+            d.name  = "ECU Name Msg Count";
+            d.value = abcd[0];
+            d.unit  = "";
+            break;
+        case 0x02: // VIN (multi-frame)
+        case 0x04: // Calibration ID (multi-frame)
+        case 0x08: // In-use performance tracking (multi-frame)
+        case 0x0A: // ECU name (multi-frame)
+            d.name  = (pid == 0x02) ? "VIN" :
+                      (pid == 0x04) ? "Calibration ID" :
+                      (pid == 0x08) ? "IUPT Data" : "ECU Name";
+            d.value = 0;
+            d.unit  = "multi-frame";
+            break;
+        default: {
+            char buf[8];
+            std::snprintf(buf, sizeof(buf), "%02X", pid);
+            d.name  = std::string("Infotype 0x") + buf;
+            d.value = abcd[0];
+            d.unit  = "";
+            break;
+        }
+        } // switch(pid) service 09
+
     } else {
         d.valid = false;
     }

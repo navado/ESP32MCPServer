@@ -138,7 +138,10 @@ public:
     template<typename T> void print(T v)   { std::string s = toStr(v); printf("%s", s.c_str()); }
     template<typename T> void println(T v) { std::string s = toStr(v); printf("%s\n", s.c_str()); }
     void println()                         { printf("\n"); }
-    template<typename... A> void printf(const char* fmt, A... args) { ::printf(fmt, args...); }
+    template<typename... A> void printf(const char* fmt, A... args) {
+        if constexpr (sizeof...(A) == 0) ::printf("%s", fmt);
+        else                             ::printf(fmt, args...);
+    }
     bool available() const { return false; }
     int  read()            { return -1; }
     operator bool() const  { return true; }

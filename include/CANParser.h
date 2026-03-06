@@ -28,14 +28,19 @@ struct CANFrame {
 // OBD-II (ISO 15765-4 / SAE J1979)
 // ---------------------------------------------------------------------------
 struct OBDIIData {
-    uint8_t     service; // 0x01 = current data
+    uint8_t     service; // 0x01 = current data, 0x09 = vehicle info
     uint8_t     pid;
     std::string name;
     double      value;
     std::string unit;
+    // Some PIDs return two quantities (e.g. O2 voltage + fuel trim,
+    // equivalence ratio + current).  value2/unit2 carry the second datum;
+    // unit2 is empty when only one value is present.
+    double      value2;
+    std::string unit2;
     bool        valid;
 
-    OBDIIData() : service(0), pid(0), value(0), valid(false) {}
+    OBDIIData() : service(0), pid(0), value(0), value2(0), valid(false) {}
 };
 
 // ---------------------------------------------------------------------------

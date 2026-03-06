@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -81,6 +82,12 @@ public:
     // Update the broadcast interval and persist it to NVS.
     void setBroadcastInterval(uint32_t ms);
 
+    // Register a callback that returns a JSON object string describing the
+    // current bus history configuration (allocated capacities, etc.).
+    // Called by buildBroadcastPayload() to include history info in announcements.
+    // Pass nullptr to clear.
+    void setHistoryInfoCb(std::function<std::string()> cb);
+
     // Update the advertised sensor list.  If the network is already connected
     // an immediate capability announcement (mDNS restart + UDP broadcast) is
     // triggered so that listening clients receive the updated sensor manifest
@@ -114,6 +121,7 @@ private:
     uint32_t                         lastBroadcast_ = 0;
     String                           currentIp_;
     std::vector<DiscoverySensorInfo> sensors_;
+    std::function<std::string()>     historyInfoCb_;
 
     void startMDNS();
     void stopMDNS();
