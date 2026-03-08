@@ -42,6 +42,13 @@ private:
     std::string _buf;
 };
 
+// ─── AsyncWebServerResponse ───────────────────────────────────────────────────
+class AsyncWebServerResponse {
+public:
+    virtual ~AsyncWebServerResponse() = default;
+    void addHeader(const char* /*name*/, const char* /*value*/) {}
+};
+
 // ─── AsyncWebServerRequest ────────────────────────────────────────────────────
 class AsyncWebServerRequest {
 public:
@@ -51,6 +58,7 @@ public:
 
     void send(int /*code*/, const char* /*type*/ = "text/plain", const String& /*content*/ = "") {}
     void send(AsyncResponseStream* /*stream*/) {}
+    void send(AsyncWebServerResponse* resp) { delete resp; }
     // Template overload so LittleFS (MockLittleFS) can be passed without type errors
     template<typename FS>
     void send(FS& /*fs*/, const String& /*path*/, const char* /*type*/ = nullptr) {}
@@ -63,6 +71,14 @@ public:
     AsyncResponseStream* beginResponseStream(const char* /*contentType*/) {
         return new AsyncResponseStream();
     }
+    AsyncWebServerResponse* beginResponse(int /*code*/, const char* /*type*/ = "text/plain",
+                                          const String& /*content*/ = "") {
+        return new AsyncWebServerResponse();
+    }
+
+    // HTTP Basic Auth stubs (always pass in tests)
+    bool authenticate(const char* /*user*/, const char* /*password*/) const { return true; }
+    void requestAuthentication(const char* /*realm*/ = nullptr) {}
 };
 
 // ─── AsyncWebSocketClient ─────────────────────────────────────────────────────
@@ -95,10 +111,16 @@ public:
 // ─── AsyncWebServer ───────────────────────────────────────────────────────────
 class AsyncWebServer {
 public:
-    using HandlerCB = std::function<void(AsyncWebServerRequest*)>;
+    using HandlerCB  = std::function<void(AsyncWebServerRequest*)>;
+    using UploadCB   = std::function<void(AsyncWebServerRequest*,
+                                          const String&, size_t,
+                                          uint8_t*, size_t, bool)>;
 
     explicit AsyncWebServer(uint16_t /*port*/ = 80) {}
     void on(const char* /*uri*/, int /*method*/, HandlerCB /*handler*/) {}
+    // Two-callback overload used by OTA upload handlers.
+    void on(const char* /*uri*/, int /*method*/,
+            HandlerCB /*handler*/, UploadCB /*upload*/) {}
     void addHandler(AsyncWebSocket* /*ws*/) {}
     template<typename FS>
     void serveStatic(const char* /*uri*/, FS& /*fs*/, const char* /*path*/,
