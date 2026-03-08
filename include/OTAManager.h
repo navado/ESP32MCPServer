@@ -8,6 +8,32 @@
 #include <ESPAsyncWebServer.h>
 
 // ---------------------------------------------------------------------------
+// Build-flag tunables — override any of these in platformio.ini build_flags.
+// Fallback defaults are provided here so the header compiles stand-alone.
+//
+//   OTA_USERNAME          HTTP Basic Auth username                ("admin")
+//   OTA_NVS_NAMESPACE     NVS namespace used to persist password  ("ota")
+//   OTA_NVS_PWD_KEY       NVS key for the password value          ("password")
+//   OTA_DEFAULT_PASSWORD  Password used on first boot             ("admin")
+//   OTA_MIN_PASSWORD_LEN  Minimum acceptable password length      (8)
+// ---------------------------------------------------------------------------
+#ifndef OTA_USERNAME
+#  define OTA_USERNAME         "admin"
+#endif
+#ifndef OTA_NVS_NAMESPACE
+#  define OTA_NVS_NAMESPACE    "ota"
+#endif
+#ifndef OTA_NVS_PWD_KEY
+#  define OTA_NVS_PWD_KEY      "password"
+#endif
+#ifndef OTA_DEFAULT_PASSWORD
+#  define OTA_DEFAULT_PASSWORD "admin"
+#endif
+#ifndef OTA_MIN_PASSWORD_LEN
+#  define OTA_MIN_PASSWORD_LEN 8
+#endif
+
+// ---------------------------------------------------------------------------
 // OTAManager — password-protected Over-The-Air firmware update service.
 //
 // Routes registered on the shared AsyncWebServer:
@@ -15,14 +41,14 @@
 //                        or a built-in minimal HTML form if the file is absent).
 //   GET  /ota/status   — Public JSON endpoint: running fw version + last result.
 //   POST /ota/update   — Accepts a multipart firmware binary.  Requires HTTP
-//                        Basic Auth (username "admin", password as configured).
+//                        Basic Auth (username OTA_USERNAME, password as configured).
 //   GET  /ota/config   — Requires auth. Returns OTA configuration JSON.
 //   POST /ota/config   — Requires auth with current password.  Accepts form
 //                        field "password" to update the OTA password.
 //
 // Password storage:
-//   Stored in NVS namespace "ota", key "password".
-//   Default on first boot: "admin"  (change immediately after flashing!).
+//   Stored in NVS namespace OTA_NVS_NAMESPACE, key OTA_NVS_PWD_KEY.
+//   Default on first boot: OTA_DEFAULT_PASSWORD  (change immediately after flashing!).
 //
 // Usage:
 //   OTAManager otaManager;
@@ -47,11 +73,6 @@ public:
     String getStatusJson() const;
 
 private:
-    static constexpr const char* OTA_USERNAME   = "admin";
-    static constexpr const char* NVS_NS         = "ota";
-    static constexpr const char* NVS_PWD_KEY    = "password";
-    static constexpr const char* DEFAULT_PWD    = "admin";
-
     Preferences preferences_;
     String      password_;          // current OTA password (plaintext in NVS)
     bool        uploadError_    = false;

@@ -11,17 +11,17 @@
 OTAManager::OTAManager() {}
 
 void OTAManager::begin() {
-    preferences_.begin(NVS_NS, /*readOnly=*/true);
-    password_ = preferences_.getString(NVS_PWD_KEY, DEFAULT_PWD);
+    preferences_.begin(OTA_NVS_NAMESPACE, /*readOnly=*/true);
+    password_ = preferences_.getString(OTA_NVS_PWD_KEY, OTA_DEFAULT_PASSWORD);
     preferences_.end();
     Serial.printf("[OTA] Manager ready (password %s)\n",
-                  password_ == DEFAULT_PWD ? "is default — change it!" : "is set");
+                  password_ == OTA_DEFAULT_PASSWORD ? "is default — change it!" : "is set");
 }
 
 void OTAManager::setPassword(const String& newPassword) {
     if (newPassword.isEmpty()) return;
-    preferences_.begin(NVS_NS, /*readOnly=*/false);
-    preferences_.putString(NVS_PWD_KEY, newPassword);
+    preferences_.begin(OTA_NVS_NAMESPACE, /*readOnly=*/false);
+    preferences_.putString(OTA_NVS_PWD_KEY, newPassword);
     preferences_.end();
     password_ = newPassword;
 }
@@ -63,7 +63,7 @@ void OTAManager::registerRoutes(AsyncWebServer& server) {
 // ---------------------------------------------------------------------------
 
 bool OTAManager::authenticate(AsyncWebServerRequest* request) const {
-    return request->authenticate(OTA_USERNAME, password_.c_str());
+    return request->authenticate(OTA_USERNAME, password_.c_str());  // OTA_USERNAME from build flags
 }
 
 // ---------------------------------------------------------------------------
@@ -85,7 +85,7 @@ void OTAManager::handlePageGet(AsyncWebServerRequest* request) const {
         "<input type='file' name='firmware' accept='.bin' required><br><br>"
         "<input type='submit' value='Upload &amp; Flash'>"
         "</form>"
-        "<p><em>Authentication required: username <b>admin</b>, password as configured.</em></p>"
+        "<p><em>Authentication required: username <b>" OTA_USERNAME "</b>, password as configured.</em></p>"
         "<p><a href='/ota/status'>Status JSON</a></p>"
         "</body></html>";
     request->send(200, "text/html", HTML);
@@ -207,7 +207,7 @@ void OTAManager::handleConfigGet(AsyncWebServerRequest* request) const {
     JsonDocument doc;
     doc["username"]        = OTA_USERNAME;
     doc["passwordIsSet"]   = true;
-    doc["isDefaultPwd"]    = (password_ == DEFAULT_PWD);
+    doc["isDefaultPwd"]    = (password_ == OTA_DEFAULT_PASSWORD);
     String json;
     serializeJson(doc, json);
     AsyncResponseStream* resp = request->beginResponseStream("application/json");
@@ -229,8 +229,9 @@ void OTAManager::handleConfigPost(AsyncWebServerRequest* request) {
         return;
     }
     String newPwd = request->getParam("password", true)->value();
-    if (newPwd.length() < 8) {
-        request->send(400, "text/plain", "Password must be at least 8 characters");
+    if (newPwd.length() < OTA_MIN_PASSWORD_LEN) {
+        request->send(400, "text/plain",
+            "Password must be at least " + String(OTA_MIN_PASSWORD_LEN) + " characters");
         return;
     }
     setPassword(newPwd);
