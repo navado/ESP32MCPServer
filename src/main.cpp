@@ -9,6 +9,7 @@
 #include "MetricsSystem.h"
 #include "DiscoveryManager.h"
 #include "BusHistory.h"
+#include "OTAManager.h"
 
 // ---------------------------------------------------------------------------
 // Minimal ESP32 I2C implementation (wraps Arduino Wire library)
@@ -113,6 +114,7 @@ MCPServer         mcpServer;
 ESP32I2CInterface i2cBus;
 SensorManager*    sensorManager = nullptr;
 DiscoveryManager  discoveryManager;
+OTAManager        otaManager;
 
 // Task handles
 TaskHandle_t mcpTaskHandle = nullptr;
@@ -201,6 +203,10 @@ void setup() {
             out += tmp; out += ",\"result\":"; out += cfgJson; out += "}";
             return out;
         });
+
+    // Initialize OTA manager — loads password from NVS, registers /ota/* routes.
+    otaManager.begin();
+    networkManager.setOTAManager(&otaManager);
 
     // Initialize discovery manager (loads NVS config; hostname derived from MAC
     // if not previously set).  Must be called before networkManager.begin() so

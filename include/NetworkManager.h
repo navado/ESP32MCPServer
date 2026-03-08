@@ -10,6 +10,9 @@
 // Forward declarations — avoid pulling ESP32-only headers into every TU.
 class DiscoveryManager;
 namespace mcp { class BusHistory; }
+#ifndef NATIVE_TEST
+class OTAManager;
+#endif
 
 enum class NetworkState {
     INIT,
@@ -56,6 +59,12 @@ public:
     // Call before begin().
     void setBusHistory(mcp::BusHistory* bh);
 
+#ifndef NATIVE_TEST
+    // Wire in an OTAManager so its /ota/* routes are registered on the server.
+    // Call before begin().
+    void setOTAManager(OTAManager* ota);
+#endif
+
     // Process one pending network request synchronously (used in tests
     // where the FreeRTOS background task is not running).
     void handleClient();
@@ -79,6 +88,9 @@ private:
     NetworkCredentials credentials;
     DiscoveryManager*  discovery_   = nullptr;
     mcp::BusHistory*   busHistory_  = nullptr;
+#ifndef NATIVE_TEST
+    OTAManager*        ota_         = nullptr;
+#endif
 
     void setupWebServer();
     void handleRequest(const NetworkRequest& request);

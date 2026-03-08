@@ -1,6 +1,10 @@
 #include "NetworkManager.h"
 #include "DiscoveryManager.h"
 #include "BusHistory.h"
+#ifndef NATIVE_TEST
+#  include "board_config.h"
+#  include "OTAManager.h"
+#endif
 #include <esp_random.h>
 #include <ArduinoJson.h>
 
@@ -20,6 +24,12 @@ void NetworkManager::setDiscoveryManager(DiscoveryManager* dm) {
 void NetworkManager::setBusHistory(mcp::BusHistory* bh) {
     busHistory_ = bh;
 }
+
+#ifndef NATIVE_TEST
+void NetworkManager::setOTAManager(OTAManager* ota) {
+    ota_ = ota;
+}
+#endif
 
 void NetworkManager::begin() {
     // Initialize LittleFS if not already initialized
@@ -113,6 +123,12 @@ void NetworkManager::setupWebServer() {
             request->send(404, "text/plain", "Bus history config page not found");
         }
     });
+
+#ifndef NATIVE_TEST
+    if (ota_) {
+        ota_->registerRoutes(server);
+    }
+#endif
 
     server.begin();
 }
