@@ -1,6 +1,7 @@
 #include "NetworkManager.h"
 #include "DiscoveryManager.h"
 #include "BusHistory.h"
+#include "OTAManager.h"
 #include <esp_random.h>
 #include <ArduinoJson.h>
 
@@ -19,6 +20,10 @@ void NetworkManager::setDiscoveryManager(DiscoveryManager* dm) {
 
 void NetworkManager::setBusHistory(mcp::BusHistory* bh) {
     busHistory_ = bh;
+}
+
+void NetworkManager::setOTAManager(OTAManager* ota) {
+    ota_ = ota;
 }
 
 void NetworkManager::begin() {
@@ -113,6 +118,10 @@ void NetworkManager::setupWebServer() {
             request->send(404, "text/plain", "Bus history config page not found");
         }
     });
+
+    if (ota_) {
+        ota_->registerRoutes(server);
+    }
 
     server.begin();
 }
