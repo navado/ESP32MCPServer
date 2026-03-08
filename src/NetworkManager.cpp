@@ -2,6 +2,7 @@
 #include "DiscoveryManager.h"
 #include "BusHistory.h"
 #ifndef NATIVE_TEST
+#  include "board_config.h"
 #  include "OTAManager.h"
 #endif
 #include <esp_random.h>

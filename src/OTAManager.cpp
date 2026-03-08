@@ -103,7 +103,7 @@ String OTAManager::getStatusJson() const {
         doc["partition"] = part->label;
     }
 
-    const esp_app_desc_t* appDesc = esp_app_get_description();
+    const esp_app_desc_t* appDesc = esp_ota_get_app_description();
     if (appDesc) {
         doc["version"]    = appDesc->version;
         doc["idfVersion"] = appDesc->idf_ver;
