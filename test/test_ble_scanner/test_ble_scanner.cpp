@@ -435,8 +435,11 @@ void test_capture_bytes_grows_with_history(void) {
     size_t base = reportBytes(r);
     r.payloadHistory.push_back(std::string(MAX_PAYLOAD_HEX, 'a'));
     TEST_ASSERT_TRUE(reportBytes(r) >= base + MAX_PAYLOAD_HEX);
+    // Compare against the stored copies: copying a std::string may change its
+    // capacity (libstdc++ shrinks to size, libc++ does not), and the estimate
+    // is capacity-based.
     std::vector<mcp::BLEAdvReport> reports{r, r};
-    TEST_ASSERT_EQUAL(2 * reportBytes(r), captureBytes(reports));
+    TEST_ASSERT_EQUAL(reportBytes(reports[0]) + reportBytes(reports[1]), captureBytes(reports));
 }
 
 void test_budget_bounds_worst_case_capture(void) {
