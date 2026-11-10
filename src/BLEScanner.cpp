@@ -401,13 +401,16 @@ std::vector<BLEServiceInfo> BLEScanner::getServicesResults(uint32_t notifyCaptur
     lock();
     uint32_t waited = 0;
     const uint32_t enumLimit = notifyCaptureMs + DISCOVERY_TIMEOUT_MS;
-    bool busy = gattStateConnected(gattState_);
+    // Wait only while the enumeration is actually running.  (gattStateConnected
+    // is also true in Connected, i.e. AFTER enumeration finished, which made
+    // every call wait the full enumLimit while blocking the MCP task.)
+    bool busy = gattcore::gattEnumInProgress(gattState_, loadPending_);
     unlock();
     while (busy && waited < enumLimit) {
         delay(50);
         waited += 50;
         lock();
-        busy = gattStateConnected(gattState_);
+        busy = gattcore::gattEnumInProgress(gattState_, loadPending_);
         unlock();
     }
 

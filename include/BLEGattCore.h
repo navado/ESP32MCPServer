@@ -28,6 +28,16 @@ inline bool gattStateConnected(GattState s) {
            s == GattState::Reading || s == GattState::NotifyWait;
 }
 
+// True while an enumeration started by ble/services/start is still running.
+// `Connected` alone means the enumeration is FINISHED (or never started), so
+// it must not count as busy; it is busy only while a completed discovery is
+// waiting for the task to load the service database (loadPending).
+inline bool gattEnumInProgress(GattState s, bool loadPending) {
+    return s == GattState::Discovering || s == GattState::Reading ||
+           s == GattState::NotifyWait ||
+           (s == GattState::Connected && loadPending);
+}
+
 // A deadline measured from a start millis value.  nowMillis() must be
 // monotonic (e.g. millis() on ESP32).
 inline bool deadlineExpired(uint32_t startMillis, uint32_t timeoutMs,
