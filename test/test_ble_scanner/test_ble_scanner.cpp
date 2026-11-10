@@ -343,6 +343,66 @@ void test_record_payload_truncation_deduplicates_to_common_prefix(void) {
 
 // ---------------------------------------------------------------------------
 
+// ---- follow-ups (#10) ------------------------------------------------------
+
+void test_addr_type_names_roundtrip(void) {
+    for (uint8_t t = ADDR_TYPE_PUBLIC; t <= ADDR_TYPE_RPA_RANDOM; ++t) {
+        uint8_t out = 0xFF;
+        TEST_ASSERT_TRUE(parseAddrType(addrTypeName(t), out));
+        TEST_ASSERT_EQUAL_UINT8(t, out);
+    }
+    uint8_t out = 0;
+    TEST_ASSERT_TRUE(parseAddrType("RANDOM", out));
+    TEST_ASSERT_EQUAL_UINT8(ADDR_TYPE_RANDOM, out);
+    TEST_ASSERT_FALSE(parseAddrType("static", out));
+    TEST_ASSERT_FALSE(parseAddrType("", out));
+}
+
+void test_lookup_addr_type_case_insensitive(void) {
+    std::vector<mcp::BLEAdvReport> reports(2);
+    reports[0].mac = "aa:bb:cc:dd:ee:01"; reports[0].addrType = ADDR_TYPE_PUBLIC;
+    reports[1].mac = "d7:2f:77:38:f1:eb"; reports[1].addrType = ADDR_TYPE_RANDOM;
+    uint8_t t = 0xFF;
+    TEST_ASSERT_TRUE(lookupAddrType(reports, "D7:2F:77:38:F1:EB", t));
+    TEST_ASSERT_EQUAL_UINT8(ADDR_TYPE_RANDOM, t);
+    TEST_ASSERT_FALSE(lookupAddrType(reports, "11:22:33:44:55:66", t));
+}
+
+void test_merge_fills_name_from_scan_response(void) {
+    mcp::BLEAdvReport r;
+    r.mac = "aa:bb:cc:dd:ee:ff";
+    mergeReportFields(r, "", "", "");                     // first adv: nothing
+    TEST_ASSERT_TRUE(r.name.empty());
+    mergeReportFields(r, "MX Master 4", "180f", "4c00");  // scan response
+    TEST_ASSERT_EQUAL_STRING("MX Master 4", r.name.c_str());
+    TEST_ASSERT_EQUAL_STRING("180f", r.servicesHex.c_str());
+    TEST_ASSERT_EQUAL_STRING("4c00", r.manufacturer.c_str());
+}
+
+void test_merge_does_not_overwrite_known_fields(void) {
+    mcp::BLEAdvReport r;
+    r.name = "first"; r.servicesHex = "aaaa"; r.manufacturer = "0001";
+    mergeReportFields(r, "second", "bbbb", "0002");
+    TEST_ASSERT_EQUAL_STRING("first", r.name.c_str());
+    TEST_ASSERT_EQUAL_STRING("aaaa", r.servicesHex.c_str());
+    TEST_ASSERT_EQUAL_STRING("0001", r.manufacturer.c_str());
+}
+
+void test_registry_counts_dropped_when_full(void) {
+    std::vector<BLEPayloadEntry> reg;
+    uint32_t dropped = 0;
+    char buf[16];
+    for (size_t i = 0; i < MAX_REGISTRY_PAYLOADS + 5; ++i) {
+        snprintf(buf, sizeof(buf), "%04zx", i);
+        recordRegistryPayload(reg, buf, 1000 + i, &dropped);
+    }
+    TEST_ASSERT_EQUAL(MAX_REGISTRY_PAYLOADS, reg.size());
+    TEST_ASSERT_EQUAL_UINT32(5, dropped);
+    // A repeat of a retained payload is not a drop.
+    recordRegistryPayload(reg, "0000", 5000, &dropped);
+    TEST_ASSERT_EQUAL_UINT32(5, dropped);
+}
+
 int runUnityTests(void) {
     UNITY_BEGIN();
     RUN_TEST(test_hex_encode_basic);
@@ -377,6 +437,11 @@ int runUnityTests(void) {
     RUN_TEST(test_registry_truncates_and_dedupes_on_truncated_form);
     RUN_TEST(test_registry_bounds_at_max_and_ignores_new_distinct);
     RUN_TEST(test_registry_empty_ignored);
+    RUN_TEST(test_addr_type_names_roundtrip);
+    RUN_TEST(test_lookup_addr_type_case_insensitive);
+    RUN_TEST(test_merge_fills_name_from_scan_response);
+    RUN_TEST(test_merge_does_not_overwrite_known_fields);
+    RUN_TEST(test_registry_counts_dropped_when_full);
     return UNITY_END();
 }
 

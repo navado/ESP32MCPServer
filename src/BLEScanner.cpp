@@ -114,6 +114,7 @@ bool BLEScanner::startScan(uint32_t durationMs) {
     reports_.clear();
     seenPayloads_.clear();
     payloadRegistry_.clear();
+    registryDropped_ = 0;
     scanDurationMs_ = durationMs;
     scanStartedAt_ = millis();
     scanning_ = true;
@@ -170,6 +171,13 @@ std::vector<BLEPayloadEntry> BLEScanner::getPayloadRegistry() {
     return out;
 }
 
+uint32_t BLEScanner::getRegistryDropped() const {
+    lock();
+    uint32_t d = registryDropped_;
+    unlock();
+    return d;
+}
+
 uint64_t BLEScanner::getScanStartedAt() const {
     lock();
     uint64_t t = scanStartedAt_;
@@ -210,14 +218,32 @@ void BLEScanner::onAdv(BLEAdvertisedDevice* adv) {
         payloadHex = hexEncode(raw, rawLen);
     }
 
+    // Fields that may arrive only in the scan response (a separate report for
+    // the same MAC): collect them for both the new-device and merge paths.
+    std::string name;
+    if (adv->haveName()) name = adv->getName().c_str();
+    std::string servicesHex;
+    for (int i = 0; i < adv->getServiceUUIDCount(); ++i) {
+        if (!servicesHex.empty()) servicesHex += ",";
+        servicesHex += adv->getServiceUUID(i).toString();
+    }
+    std::string manufacturer;
+    if (adv->haveManufacturerData()) {
+        std::string md = adv->getManufacturerData();
+        manufacturer = hexEncode(reinterpret_cast<const uint8_t*>(md.data()),
+                                 md.length());
+    }
+
     // Merge duplicate reports for the same MAC.
     for (auto& r : reports_) {
         if (r.mac == mac) {
             r.rssi = adv->getRSSI();
+            blecore::mergeReportFields(r, name, servicesHex, manufacturer);
             recordPayload(r.payloadHistory, r.count, seenPayloads_[r.mac], payloadHex);
             // MAC-independent registry: also record across all broadcasters.
             if (!payloadHex.empty()) {
-                blecore::recordRegistryPayload(payloadRegistry_, payloadHex, millis());
+                blecore::recordRegistryPayload(payloadRegistry_, payloadHex, millis(),
+                                              &registryDropped_);
             }
             unlock();
             return;
@@ -236,29 +262,18 @@ void BLEScanner::onAdv(BLEAdvertisedDevice* adv) {
     rep.isConnectable = payloadIsConnectable(raw, rawLen);
     rep.firstSeen = millis();
     rep.count = 0;
-
-    if (adv->haveName()) rep.name = adv->getName().c_str();
-
-    // Advertised service UUIDs (128-bit / 32-bit / 16-bit, as reported).
-    for (int i = 0; i < adv->getServiceUUIDCount(); ++i) {
-        std::string s = adv->getServiceUUID(i).toString();
-        if (!rep.servicesHex.empty()) rep.servicesHex += ",";
-        rep.servicesHex += s;
-    }
-
-    // Manufacturer specific data (company id + data).
-    if (adv->haveManufacturerData()) {
-        std::string md = adv->getManufacturerData();
-        rep.manufacturer = hexEncode(reinterpret_cast<const uint8_t*>(md.data()),
-                                     md.length());
-    }
+    rep.addrType = static_cast<uint8_t>(adv->getAddressType());
+    rep.name = name;
+    rep.servicesHex = servicesHex;
+    rep.manufacturer = manufacturer;
 
     reports_.push_back(rep);
     recordPayload(reports_.back().payloadHistory, reports_.back().count,
                   seenPayloads_[rep.mac], payloadHex);
     // MAC-independent registry: record the payload across all broadcasters.
     if (!payloadHex.empty()) {
-        blecore::recordRegistryPayload(payloadRegistry_, payloadHex, millis());
+        blecore::recordRegistryPayload(payloadRegistry_, payloadHex, millis(),
+                                              &registryDropped_);
     }
     unlock();
 }
@@ -287,7 +302,7 @@ void BLEScanner::onAdv(BLEAdvertisedDevice* adv) {
 // may be open, so a late OPEN_EVT cannot leak the link.
 // ---------------------------------------------------------------------------
 
-bool BLEScanner::connect(const std::string& mac, uint32_t timeoutMs) {
+bool BLEScanner::connect(const std::string& mac, uint32_t timeoutMs, int addrType) {
     if (timeoutMs == 0) timeoutMs = 1;
     esp_bd_addr_t addr;
     int n = sscanf(mac.c_str(), "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
@@ -298,6 +313,11 @@ bool BLEScanner::connect(const std::string& mac, uint32_t timeoutMs) {
     if (connected_ || gattState_ != GattState::Idle) { unlock(); return false; }
     connectedMac_ = mac;
     memcpy(peerAddr_, addr, 6);
+    if (addrType >= 0) {
+        peerAddrType_ = static_cast<uint8_t>(addrType);
+    } else if (!blecore::lookupAddrType(reports_, mac, peerAddrType_)) {
+        peerAddrType_ = blecore::ADDR_TYPE_PUBLIC;  // not seen in a scan
+    }
     hasPeer_ = true;
     connectTimeoutMs_ = timeoutMs;
     openIssued_ = false;
@@ -313,6 +333,13 @@ bool BLEScanner::connect(const std::string& mac, uint32_t timeoutMs) {
 
     ensureGattTask();
     return true;
+}
+
+uint8_t BLEScanner::getPeerAddrType() const {
+    lock();
+    uint8_t t = peerAddrType_;
+    unlock();
+    return t;
 }
 
 bool BLEScanner::isConnecting() const {
@@ -459,6 +486,7 @@ void BLEScanner::gattTaskBody() {
         uint16_t cid = 0;
         esp_bd_addr_t peer;
         memcpy(peer, peerAddr_, 6);
+        esp_ble_addr_type_t peerType = static_cast<esp_ble_addr_type_t>(peerAddrType_);
         switch (st) {
             case GattState::Connecting: {
                 if (!appRegistered_ && !registerIssued_) {
@@ -500,7 +528,7 @@ void BLEScanner::gattTaskBody() {
         if (doRegister) {
             esp_ble_gattc_app_register(GATTC_APP_ID);
         } else if (doOpen) {
-            esp_ble_gattc_open(gif, peer, BLE_ADDR_TYPE_PUBLIC, true);
+            esp_ble_gattc_open(gif, peer, peerType, true);
         } else if (doSearch) {
             esp_ble_gattc_search_service(gif, cid, nullptr);
         } else if (doClose) {

@@ -497,6 +497,7 @@ void setup() {
                     o["services"]     = r.servicesHex;
                     o["manufacturer"] = r.manufacturer;
                     o["connectable"]  = r.isConnectable;
+                    o["addrType"]     = mcp::blecore::addrTypeName(r.addrType);
                     o["count"]        = r.count;
                     if (r.firstSeen != 0) o["firstSeen"] = r.firstSeen;
                     JsonArray hist = o["payloadHistory"].to<JsonArray>();
@@ -525,6 +526,7 @@ void setup() {
                 o["services"]     = r.servicesHex;
                 o["manufacturer"] = r.manufacturer;
                 o["connectable"]  = r.isConnectable;
+                o["addrType"]     = mcp::blecore::addrTypeName(r.addrType);
                 o["count"]        = r.count;
                 if (r.firstSeen != 0) o["firstSeen"] = r.firstSeen;
                 // Quick-look view: only the newest MAX_PAYLOADS_VIEW payloads.
@@ -557,6 +559,7 @@ void setup() {
             uint32_t dur = bleScanner.getScanDurationMs();
             if (startAt != 0) doc["result"]["scanStartedMs"] = millis() - startAt;
             if (dur != 0 || startAt != 0) doc["result"]["durationMs"] = dur;
+            doc["result"]["dropped"] = bleScanner.getRegistryDropped();
             JsonArray arr = doc["result"]["payloads"].to<JsonArray>();
             for (const auto& e : registry) {
                 JsonObject o = arr.add<JsonObject>();
@@ -584,6 +587,7 @@ void setup() {
             uint32_t dur = bleScanner.getScanDurationMs();
             if (startAt != 0) doc["result"]["scanStartedMs"] = millis() - startAt;
             if (dur != 0 || startAt != 0) doc["result"]["durationMs"] = dur;
+            doc["result"]["dropped"] = bleScanner.getRegistryDropped();
             JsonArray arr = doc["result"]["payloads"].to<JsonArray>();
             for (const auto& e : registry) {
                 JsonObject o = arr.add<JsonObject>();
@@ -616,6 +620,20 @@ void setup() {
             std::string mac;
             if (p["mac"].is<const char*>()) mac = p["mac"].as<const char*>();
             uint32_t timeoutMs = p["timeoutMs"] | 5000u;
+            int addrType = -1;  // default: type recorded by the last scan
+            if (p["addrType"].is<const char*>()) {
+                uint8_t t = 0;
+                if (!mcp::blecore::parseAddrType(p["addrType"].as<const char*>(), t)) {
+                    JsonDocument doc;
+                    doc["jsonrpc"] = "2.0";
+                    doc["id"]      = id;
+                    doc["error"]["code"]    = -32602;
+                    doc["error"]["message"] =
+                        "Invalid params: addrType must be public|random|rpa-public|rpa-random";
+                    std::string out; serializeJson(doc, out); return out;
+                }
+                addrType = t;
+            }
             if (mac.empty()) {
                 JsonDocument doc;
                 doc["jsonrpc"] = "2.0";
@@ -624,13 +642,17 @@ void setup() {
                 doc["error"]["message"] = "Invalid params: mac required";
                 std::string out; serializeJson(doc, out); return out;
             }
-            bool started = bleScanner.connect(mac, timeoutMs);
+            bool started = bleScanner.connect(mac, timeoutMs, addrType);
             JsonDocument doc;
             doc["jsonrpc"] = "2.0";
             doc["id"] = id;
             doc["result"]["started"]    = started;
             doc["result"]["connecting"] = started && bleScanner.isConnecting();
             doc["result"]["connected"]  = bleScanner.isConnected();
+            if (started) {
+                doc["result"]["addrType"] =
+                    mcp::blecore::addrTypeName(bleScanner.getPeerAddrType());
+            }
             std::string out; serializeJson(doc, out); return out;
         });
 

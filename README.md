@@ -541,10 +541,10 @@ Active BLE advertising capture for reverse-engineering broadcast formats, plus o
 |---|---|---|
 | `ble/scan` | `durationMs?` | Start a scan (default 5000 ms; 0 = continuous until `ble/scan/stop`); returns immediately. If a scan is already running: `{started:false, scanning:true, remainingMs}` |
 | `ble/scan/results` | `mac?`, `serviceUuid?`, `manufacturerId?`, `macPrefix?` | Stop the scan (if running) and return captured devices; optional case-insensitive `mac` returns only that device with its **full** payload history; optional AND-combined response filters (`serviceUuid`, `manufacturerId` hex, `macPrefix`) never affect capture |
-| `ble/scan/payloads` | — | Stop the scan and return the **MAC-independent payload registry**: distinct payloads across ALL broadcasters, first-seen order, with `count` + `firstSeen`/`lastSeen` (ms since scan start). The primary artifact for protocol reverse-engineering — survives per-MAC MAC-rotation churn |
+| `ble/scan/payloads` | — | Stop the scan and return the **MAC-independent payload registry**: distinct payloads across ALL broadcasters, first-seen order, with `count` + `firstSeen`/`lastSeen` (ms since scan start), plus `dropped`: distinct payloads discarded because the registry (64 entries) was full. The primary artifact for protocol reverse-engineering — survives per-MAC MAC-rotation churn |
 | `ble/scan/poll` | — | Live read of the payload registry WITHOUT stopping the scan (stateless; diff by `firstSeen`) |
 | `ble/scan/stop` | — | Stop a continuous scan early |
-| `ble/connect` | `mac`, `timeoutMs?` | Begin an **asynchronous** GATT connect to a peer MAC (default timeout 5000 ms) |
+| `ble/connect` | `mac`, `timeoutMs?`, `addrType?` | Begin an **asynchronous** GATT connect to a peer MAC (default timeout 5000 ms). `addrType` is `public`, `random`, `rpa-public` or `rpa-random`; when omitted, the type recorded by the last scan for that MAC is used (public if it was not seen). Most phones, watches and sensors use random addresses and cannot be opened as public |
 | `ble/connect/results` | — | Poll the outcome of the last async connect |
 | `ble/disconnect` | — | Drop the GATT link |
 | `ble/services/start` | — | Enumerate services/characteristics (background task); returns immediately |
@@ -568,7 +568,7 @@ Active BLE advertising capture for reverse-engineering broadcast formats, plus o
   "jsonrpc":"2.0","id":15,
   "result":{"devices":[
     {
-      "mac":"62:38:e6:6b:1c:f9","name":"","rssi":-56,"connectable":true,
+      "mac":"62:38:e6:6b:1c:f9","name":"","rssi":-56,"connectable":true,"addrType":"random",
       "count":2,
       "payloadHistory":[
         "0201010effff006db643ce97fe427cd5964c03038fae",

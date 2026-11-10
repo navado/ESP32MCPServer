@@ -5,6 +5,7 @@
 // test_ble_scanner suite.
 
 #include <cstdint>
+#include <cctype>
 #include <cstdlib>
 #include <map>
 #include <string>
@@ -23,10 +24,14 @@ struct BLEAdvReport {
     std::vector<std::string> payloadHistory;
     std::string servicesHex;   // advertised 128/32/16-bit service UUIDs, comma-separated
     std::string manufacturer;  // manufacturer data, hex (company id first 2 bytes)
-    bool        isConnectable;
-    uint64_t    firstSeen;     // millis() of first report
+    bool        isConnectable = false;
+    uint64_t    firstSeen = 0; // millis() of first report
     // Number of DISTINCT payloads captured for this MAC.
-    uint32_t    count;
+    uint32_t    count = 0;
+    // Advertiser address type, numerically identical to esp_ble_addr_type_t:
+    // 0 public, 1 random, 2 RPA-public, 3 RPA-random.  Needed to connect:
+    // opening a random-address peer with the public type never succeeds.
+    uint8_t     addrType = 0;
 };
 
 // One entry of the MAC-independent payload registry: a distinct payload as
@@ -174,6 +179,66 @@ inline void recordPayload(std::vector<std::string>& history, uint32_t& count,
     count = static_cast<uint32_t>(history.size());
 }
 
+// ---- Address types --------------------------------------------------------
+
+constexpr uint8_t ADDR_TYPE_PUBLIC     = 0;
+constexpr uint8_t ADDR_TYPE_RANDOM     = 1;
+constexpr uint8_t ADDR_TYPE_RPA_PUBLIC = 2;
+constexpr uint8_t ADDR_TYPE_RPA_RANDOM = 3;
+
+inline const char* addrTypeName(uint8_t t) {
+    switch (t) {
+        case ADDR_TYPE_PUBLIC:     return "public";
+        case ADDR_TYPE_RANDOM:     return "random";
+        case ADDR_TYPE_RPA_PUBLIC: return "rpa-public";
+        case ADDR_TYPE_RPA_RANDOM: return "rpa-random";
+        default:                   return "unknown";
+    }
+}
+
+// Parse a client-supplied address type ("public", "random", "rpa-public",
+// "rpa-random"; case-insensitive).  Returns false for anything else.
+inline bool parseAddrType(const std::string& s, uint8_t& out) {
+    std::string l = s;
+    for (char& c : l) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    for (uint8_t t = ADDR_TYPE_PUBLIC; t <= ADDR_TYPE_RPA_RANDOM; ++t) {
+        if (l == addrTypeName(t)) { out = t; return true; }
+    }
+    return false;
+}
+
+// Case-insensitive MAC comparison ("AA:BB:.." == "aa:bb:..").
+inline bool macEquals(const std::string& a, const std::string& b) {
+    if (a.length() != b.length()) return false;
+    for (size_t i = 0; i < a.length(); ++i) {
+        if (tolower(static_cast<unsigned char>(a[i])) !=
+            tolower(static_cast<unsigned char>(b[i]))) return false;
+    }
+    return true;
+}
+
+// Look up the address type a scan recorded for `mac`.  Returns false when the
+// MAC was not seen (callers then fall back to public).
+inline bool lookupAddrType(const std::vector<BLEAdvReport>& reports,
+                           const std::string& mac, uint8_t& out) {
+    for (const auto& r : reports) {
+        if (macEquals(r.mac, mac)) { out = r.addrType; return true; }
+    }
+    return false;
+}
+
+// Merge a later report (typically the scan response) into a known device:
+// fields that were empty in the first advertisement are filled in.  Names,
+// service lists and manufacturer data very often arrive ONLY in the scan
+// response, so without this they are never captured.
+inline void mergeReportFields(BLEAdvReport& known, const std::string& name,
+                              const std::string& servicesHex,
+                              const std::string& manufacturer) {
+    if (known.name.empty() && !name.empty()) known.name = name;
+    if (known.servicesHex.empty() && !servicesHex.empty()) known.servicesHex = servicesHex;
+    if (known.manufacturer.empty() && !manufacturer.empty()) known.manufacturer = manufacturer;
+}
+
 // Record a payload into the MAC-independent registry.  The registry is
 // insertion-ordered (first-seen order), deduped on the truncated hex form,
 // and bounded to MAX_REGISTRY_PAYLOADS entries (when full, new distinct
@@ -181,7 +246,8 @@ inline void recordPayload(std::vector<std::string>& history, uint32_t& count,
 // device eviction, so it survives a flood of rotating MACs.  `now` is the
 // millis() at observation time; the caller is responsible for locking.
 inline void recordRegistryPayload(std::vector<BLEPayloadEntry>& registry,
-                                  const std::string& payloadHex, uint64_t now) {
+                                  const std::string& payloadHex, uint64_t now,
+                                  uint32_t* dropped = nullptr) {
     if (payloadHex.empty()) return;
     std::string stored = payloadHex;
     if (stored.length() > MAX_PAYLOAD_HEX) {
@@ -194,7 +260,12 @@ inline void recordRegistryPayload(std::vector<BLEPayloadEntry>& registry,
             return;
         }
     }
-    if (registry.size() >= MAX_REGISTRY_PAYLOADS) return;  // registry full
+    if (registry.size() >= MAX_REGISTRY_PAYLOADS) {  // registry full
+        // Count what was lost so clients can tell the capture is incomplete
+        // instead of the overflow being silent.
+        if (dropped != nullptr) ++*dropped;
+        return;
+    }
     BLEPayloadEntry e;
     e.payload = stored;
     e.count = 1;

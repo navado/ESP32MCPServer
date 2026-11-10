@@ -80,6 +80,9 @@ public:
     // MAC-independent payload registry snapshot (first-seen order).
     std::vector<BLEPayloadEntry> getPayloadRegistry();
 
+    // Distinct payloads discarded because the registry was full (this scan).
+    uint32_t getRegistryDropped() const;
+
     // millis() when the current/last scan started.
     uint64_t getScanStartedAt() const;
 
@@ -99,7 +102,15 @@ public:
     // attempt was started; the open handshake completes (or is aborted) in
     // the background within `timeoutMs`.  Poll isConnected() /
     // isConnecting() or ble/connect/results for the outcome.
-    bool connect(const std::string& mac, uint32_t timeoutMs = 5000);
+    //
+    // `addrType` is the peer's address type (blecore::ADDR_TYPE_*).  Pass -1
+    // to use the type recorded by the last scan for this MAC (public if the
+    // MAC was not seen).  Random/RPA peers cannot be opened as public.
+    bool connect(const std::string& mac, uint32_t timeoutMs = 5000,
+                 int addrType = -1);
+
+    // Address type used by the current/last connect attempt.
+    uint8_t getPeerAddrType() const;
 
     // True while an async connect attempt is still in flight.
     bool isConnecting() const;
@@ -170,6 +181,8 @@ private:
     std::map<std::string, std::map<std::string, bool>> seenPayloads_;
     // MAC-independent distinct payload registry (first-seen order).
     std::vector<BLEPayloadEntry> payloadRegistry_;
+    uint32_t registryDropped_ = 0;
+    uint8_t peerAddrType_ = 0;     // blecore::ADDR_TYPE_* of the connect target
     uint64_t scanStartedAt_ = 0;   // millis() at scan start
     uint32_t scanDurationMs_ = 0;  // requested duration (0 = continuous)
     std::vector<BLEServiceInfo> services_;
