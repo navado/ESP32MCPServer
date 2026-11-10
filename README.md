@@ -43,7 +43,7 @@ Connect an AI agent directly to your hardware: query I2C sensors, parse NMEA 018
 | **Adafruit HUZZAH32** | `adafruit-huzzah32` | Xtensa LX6 × 2 @ 240 MHz | 4 MB | 520 KB | ✓ | ✗¹ | ✓ | — |
 | **M5Stack Core ESP32** | `m5stack-core` | Xtensa LX6 × 2 @ 240 MHz | 16 MB | 520 KB | ✓ | ✗¹ | ✗ | — |
 
-¹ 4 MB-flash boards: the BLE stack + the MCP WebSocket server + OTA cannot all fit the 1.25 MB OTA app slot, so BLE is compiled out (the hardware still supports it). BLE is available on the ESP32-S3 (8 MB flash).
+¹ 4 MB-flash boards: the BLE stack + the MCP WebSocket server + OTA cannot all fit the 1.25 MB OTA app slot, so BLE is compiled out (the hardware still supports it). BLE is available on the ESP32-S3 (8 MB flash). `esp32-devkitc`, `adafruit-huzzah32` and `m5stack-core` also use a larger-app partition table (`partitions_4mb_ota.csv`): **upgrading an existing board requires one USB flash and re-uploading the filesystem** — see the board pages in [`docs/boards/`](docs/boards/) and the [CHANGELOG](CHANGELOG.md).
 
 ² PSRAM mode (octal vs quad) is fixed at build time, so modules with 8 MB octal PSRAM (N8R8/N16R8; `esptool.py chip_id` reports "Embedded PSRAM 8MB") need the `-n16r8` env. Do not flash that env on DevKitC-1 variants without PSRAM or with quad PSRAM (N8R2).
 

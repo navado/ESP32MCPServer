@@ -10,6 +10,7 @@
 | Connectivity | 2.4 GHz WiFi 4 + BLE 5.0 (no Classic BT) |
 | USB | USB-C via built-in USB Serial/JTAG (no bridge chip) |
 | MCP transport | Full (WebSocket + mDNS + UDP discovery) |
+| BLE via MCP (`ble/*`) | Not available — compiled out: the BLE stack does not fit the 4 MB flash budget alongside the WebSocket transport and OTA (the radio itself supports BLE) |
 | PlatformIO env | `esp32-c3-devkitm-1` |
 | Where to buy | Espressif Store, Mouser, DigiKey, Amazon |
 
@@ -87,14 +88,24 @@ GPIO10 (UART1 RX) ───────────  TX
 ## Build Configuration
 
 ```ini
+# platformio.ini (abridged)
 [env:esp32-c3-devkitm-1]
-platform  = espressif32
-board     = esp32-c3-devkitm-1
-framework = arduino
+extends = esp32_base
+board   = esp32-c3-devkitm-1
+build_src_filter =
+    ${esp32_base.build_src_filter}
+    -<BLEScanner.cpp>
 build_flags =
-    -std=gnu++17
+    ${esp32_base.build_flags}
     -D BOARD_ESP32_C3_DEVKITM1
 ```
+
+All ESP32 envs extend `[esp32_base]`, which pins `platform = platformio/espressif32@6.9.0`
+(Arduino core 2.0.17).  Do not use an unqualified `espressif32`: on machines with a
+pioarduino / Arduino core 3.x platform installed it resolves to that platform, whose
+`Network/NetworkManager.h` shadows this project's header and breaks the build.
+
+This env keeps the default 4 MB partition layout (the RISC-V build fits the 1.25 MB app slots).
 
 ## Notes
 
