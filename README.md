@@ -561,7 +561,7 @@ The ESP32-S3 acts as a **BLE central** controlled over MCP: it captures what nea
 | **Payload registry** | Distinct payloads across *all* devices, independent of MAC — survives phones and trackers that rotate their MAC address |
 | **Capture filters** | `minRssi`, `manufacturerId`, `serviceUuid`, `macPrefix` decide what is stored, so the device of interest is not crowded out in a busy RF environment |
 | **Connect** | Asynchronous GATT connect with an enforced timeout; public, random static and resolvable private addresses (address type taken from the scan, or given explicitly); repeatable connect / disconnect / reconnect |
-| **Enumerate & read** | All primary/secondary services and characteristics with properties; every readable value read (hex + printable text) |
+| **Enumerate & read** | All primary/secondary services and characteristics with properties (up to 512 attributes); every readable value read (hex + printable text, first 64 bytes) |
 | **Notifications** | Subscribes to notify/indicate characteristics and captures the latest value within a bounded window (≤ 10 s) |
 | **Memory-aware limits** | Capture limits follow the boot-time memory plan: 64 devices / 48 KB with PSRAM, 24 devices / 16 KB without; least-recently-heard devices are evicted first |
 

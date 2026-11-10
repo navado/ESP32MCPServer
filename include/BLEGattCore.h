@@ -51,6 +51,20 @@ constexpr uint32_t DISCOVERY_TIMEOUT_MS      = 10000;  // whole service discover
 constexpr uint32_t NOTIFY_CAPTURE_TIMEOUT_MS = 3000;   // capture window
 constexpr uint32_t CLOSE_TIMEOUT_MS          = 2000;   // close handshake
 
+// Peer-controlled sizes are bounded before anything is allocated: a malicious
+// or broken peripheral must not be able to exhaust the heap from the BLE task
+// (where an uncaught bad_alloc aborts the firmware).
+constexpr uint16_t MAX_GATT_DB_ATTRS   = 512;  // attributes copied from the GATT cache
+constexpr size_t   MAX_GATT_VALUE_BYTES = 64;  // stored bytes per read/notified value
+
+inline uint16_t clampGattDbCount(uint16_t count) {
+    return count > MAX_GATT_DB_ATTRS ? MAX_GATT_DB_ATTRS : count;
+}
+
+inline size_t clampGattValueLen(size_t len) {
+    return len > MAX_GATT_VALUE_BYTES ? MAX_GATT_VALUE_BYTES : len;
+}
+
 // Upper bound for the client-supplied notifyCaptureMs.  ble/services/results
 // blocks the MCP task while it waits, so an unbounded value would stall the
 // WebSocket loop (and every other client) for as long as the caller asked.

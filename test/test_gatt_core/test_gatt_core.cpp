@@ -135,6 +135,18 @@ void test_enum_finished_or_idle_not_in_progress(void) {
     TEST_ASSERT_FALSE(gattEnumInProgress(GattState::Closing, false));
 }
 
+void test_gatt_db_count_clamped(void) {
+    TEST_ASSERT_EQUAL_UINT16(37, clampGattDbCount(37));
+    TEST_ASSERT_EQUAL_UINT16(MAX_GATT_DB_ATTRS, clampGattDbCount(MAX_GATT_DB_ATTRS));
+    TEST_ASSERT_EQUAL_UINT16(MAX_GATT_DB_ATTRS, clampGattDbCount(0xFFFF));
+}
+
+void test_gatt_value_len_clamped(void) {
+    TEST_ASSERT_EQUAL(0, clampGattValueLen(0));
+    TEST_ASSERT_EQUAL(20, clampGattValueLen(20));
+    TEST_ASSERT_EQUAL(MAX_GATT_VALUE_BYTES, clampGattValueLen(512));
+}
+
 void test_notify_capture_clamp_passes_small_values(void) {
     TEST_ASSERT_EQUAL_UINT32(0, clampNotifyCaptureMs(0));
     TEST_ASSERT_EQUAL_UINT32(3000, clampNotifyCaptureMs(3000));
@@ -171,6 +183,8 @@ int runUnityTests(void) {
     RUN_TEST(test_properties_read_notify);
     RUN_TEST(test_properties_all_flags);
     RUN_TEST(test_properties_none_empty);
+    RUN_TEST(test_gatt_db_count_clamped);
+    RUN_TEST(test_gatt_value_len_clamped);
     RUN_TEST(test_enum_in_progress_states);
     RUN_TEST(test_enum_finished_or_idle_not_in_progress);
     RUN_TEST(test_notify_capture_clamp_passes_small_values);

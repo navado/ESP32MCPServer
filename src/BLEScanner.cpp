@@ -9,6 +9,7 @@
 #include <esp_gap_bt_api.h>
 #include <esp_gatt_defs.h>
 #include <esp_gattc_api.h>
+#include <new>
 
 namespace mcp {
 
@@ -726,7 +727,7 @@ void BLEScanner::onGattcEvent(esp_gattc_cb_event_t event, esp_gatt_if_t gattcIf,
             pendingReads_.erase(it);
             if (param->read.status == ESP_GATT_OK && param->read.value_len > 0) {
                 std::string val(reinterpret_cast<const char*>(param->read.value),
-                                param->read.value_len);
+                                gattcore::clampGattValueLen(param->read.value_len));
                 std::string hex = hexEncode(reinterpret_cast<const uint8_t*>(val.data()),
                                             val.length());
                 for (auto& svc : services_) {
@@ -756,8 +757,15 @@ void BLEScanner::onGattcEvent(esp_gattc_cb_event_t event, esp_gatt_if_t gattcIf,
         case ESP_GATTC_NOTIFY_EVT: {
             lock();
             if (gattcIf != gattcIf_ || param->notify.conn_id != connId_) { unlock(); break; }
+            // Only keep values for characteristics we subscribed to, bounded in
+            // size: a peer must not be able to grow this map without limit by
+            // notifying on arbitrary handles with large payloads.
+            if (notifyHandles_.find(param->notify.handle) == notifyHandles_.end()) {
+                unlock();
+                break;
+            }
             std::string val(reinterpret_cast<const char*>(param->notify.value),
-                            param->notify.value_len);
+                            gattcore::clampGattValueLen(param->notify.value_len));
             std::string hex = hexEncode(reinterpret_cast<const uint8_t*>(val.data()),
                                         val.length());
             notifyValues_[param->notify.handle] = hex;
@@ -829,7 +837,17 @@ void BLEScanner::gattLoadServices() {
         unlock();
         return;
     }
-    esp_gattc_db_elem_t* db = new esp_gattc_db_elem_t[count];
+    // `count` is controlled by the peer: bound it, and never let an
+    // allocation failure throw on this task (an uncaught bad_alloc aborts).
+    count = gattcore::clampGattDbCount(count);
+    esp_gattc_db_elem_t* db = new (std::nothrow) esp_gattc_db_elem_t[count];
+    if (db == nullptr) {
+        lock();
+        services_.clear();
+        gattFail();
+        unlock();
+        return;
+    }
     uint16_t got = count;
     if (esp_ble_gattc_get_db(gif, cid, 1, 0xFFFF, db, &got) != ESP_OK) {
         delete[] db;
