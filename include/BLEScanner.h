@@ -65,8 +65,16 @@ public:
     // ---- Advertising scanning ----------------------------------------------
 
     // Start an advertising scan for `durationMs` (0 = continuous until stop()).
+    // `filter` decides which NEW devices are captured at all (default: all).
     // Returns true if a scan was started.  Non-blocking.
-    bool startScan(uint32_t durationMs);
+    bool startScan(uint32_t durationMs,
+                   const blecore::CaptureFilter& filter = blecore::CaptureFilter());
+
+    // Capture filter of the current/last scan.
+    blecore::CaptureFilter getCaptureFilter() const;
+
+    // Devices evicted (LRU) this scan to respect MAX_DEVICES / MAX_CAPTURE_BYTES.
+    uint32_t getDevicesEvicted() const;
 
     // Stop a running scan.  Safe to call from a normal task context.
     void stopScan();
@@ -156,6 +164,11 @@ public:
                       esp_ble_gattc_cb_param_t* param);
 
 private:
+    // Evict least-recently-heard devices (never `keepMac`) until the capture
+    // fits MAX_CAPTURE_BYTES.  Mutex held by the caller.
+    void enforceCaptureBudget(const std::string& keepMac);
+    void evictAt(size_t idx);
+
     // ---- GATT task ---------------------------------------------------------
 
     void gattTaskBody();
@@ -182,6 +195,8 @@ private:
     // MAC-independent distinct payload registry (first-seen order).
     std::vector<BLEPayloadEntry> payloadRegistry_;
     uint32_t registryDropped_ = 0;
+    uint32_t devicesEvicted_ = 0;
+    blecore::CaptureFilter filter_;
     uint8_t peerAddrType_ = 0;     // blecore::ADDR_TYPE_* of the connect target
     uint64_t scanStartedAt_ = 0;   // millis() at scan start
     uint32_t scanDurationMs_ = 0;  // requested duration (0 = continuous)

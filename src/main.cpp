@@ -432,12 +432,30 @@ void setup() {
     mcpServer.registerMethodHandler("ble/scan",
         [](uint8_t, uint32_t id, const JsonObject& p) -> std::string {
             uint32_t durationMs = p["durationMs"] | 5000u;
-            bool started = bleScanner.startScan(durationMs);
+            // Optional capture filter: decides which devices are STORED (the
+            // ble/scan/results filters only shape the response).
+            mcp::blecore::CaptureFilter filter;
+            if (p["minRssi"].is<int>()) filter.minRssi = p["minRssi"].as<int>();
+            if (p["manufacturerId"].is<const char*>())
+                filter.manufacturerPrefix =
+                    mcp::blecore::toLowerCopy(p["manufacturerId"].as<const char*>());
+            if (p["serviceUuid"].is<const char*>())
+                filter.serviceUuid = mcp::blecore::toLowerCopy(p["serviceUuid"].as<const char*>());
+            if (p["macPrefix"].is<const char*>())
+                filter.macPrefix = mcp::blecore::toLowerCopy(p["macPrefix"].as<const char*>());
+            bool started = bleScanner.startScan(durationMs, filter);
             JsonDocument doc;
             doc["jsonrpc"] = "2.0";
             doc["id"] = id;
             doc["result"]["started"] = started;
             doc["result"]["scanning"] = bleScanner.isScanning();
+            if (started && filter.active()) {
+                JsonObject cap = doc["result"]["capture"].to<JsonObject>();
+                if (filter.minRssi > -128) cap["minRssi"] = filter.minRssi;
+                if (!filter.manufacturerPrefix.empty()) cap["manufacturerId"] = filter.manufacturerPrefix;
+                if (!filter.serviceUuid.empty()) cap["serviceUuid"] = filter.serviceUuid;
+                if (!filter.macPrefix.empty()) cap["macPrefix"] = filter.macPrefix;
+            }
             if (!started) {
                 uint32_t dur = bleScanner.getScanDurationMs();
                 uint64_t startAt = bleScanner.getScanStartedAt();
@@ -483,6 +501,8 @@ void setup() {
             uint32_t dur = bleScanner.getScanDurationMs();
             if (startAt != 0) doc["result"]["scanStartedMs"] = millis() - startAt;
             if (dur != 0 || startAt != 0) doc["result"]["durationMs"] = dur;
+            doc["result"]["evicted"] = bleScanner.getDevicesEvicted();
+            doc["result"]["maxDevices"] = mcp::blecore::MAX_DEVICES;
             JsonArray arr = doc["result"]["devices"].to<JsonArray>();
             for (const auto& r : reports) {
                 if (!macFilter.empty()) {
@@ -500,6 +520,7 @@ void setup() {
                     o["addrType"]     = mcp::blecore::addrTypeName(r.addrType);
                     o["count"]        = r.count;
                     if (r.firstSeen != 0) o["firstSeen"] = r.firstSeen;
+                    if (r.lastSeen != 0) o["lastSeen"] = r.lastSeen;
                     JsonArray hist = o["payloadHistory"].to<JsonArray>();
                     for (const auto& pl : r.payloadHistory) {
                         hist.add(pl);
@@ -529,6 +550,7 @@ void setup() {
                 o["addrType"]     = mcp::blecore::addrTypeName(r.addrType);
                 o["count"]        = r.count;
                 if (r.firstSeen != 0) o["firstSeen"] = r.firstSeen;
+                if (r.lastSeen != 0) o["lastSeen"] = r.lastSeen;
                 // Quick-look view: only the newest MAX_PAYLOADS_VIEW payloads.
                 JsonArray hist = o["payloadHistory"].to<JsonArray>();
                 constexpr size_t view = mcp::blecore::MAX_PAYLOADS_VIEW;

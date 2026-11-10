@@ -108,13 +108,15 @@ void BLEScanner::begin() {
     BLEDevice::setCustomGattcHandler(gattcTrampoline);
 }
 
-bool BLEScanner::startScan(uint32_t durationMs) {
+bool BLEScanner::startScan(uint32_t durationMs, const blecore::CaptureFilter& filter) {
     lock();
     if (scanning_) { unlock(); return false; }
     reports_.clear();
     seenPayloads_.clear();
     payloadRegistry_.clear();
     registryDropped_ = 0;
+    devicesEvicted_ = 0;
+    filter_ = filter;
     scanDurationMs_ = durationMs;
     scanStartedAt_ = millis();
     scanning_ = true;
@@ -169,6 +171,34 @@ std::vector<BLEPayloadEntry> BLEScanner::getPayloadRegistry() {
     std::vector<BLEPayloadEntry> out = payloadRegistry_;
     unlock();
     return out;
+}
+
+blecore::CaptureFilter BLEScanner::getCaptureFilter() const {
+    lock();
+    blecore::CaptureFilter f = filter_;
+    unlock();
+    return f;
+}
+
+uint32_t BLEScanner::getDevicesEvicted() const {
+    lock();
+    uint32_t n = devicesEvicted_;
+    unlock();
+    return n;
+}
+
+void BLEScanner::evictAt(size_t idx) {
+    if (idx >= reports_.size()) return;
+    seenPayloads_.erase(reports_[idx].mac);
+    reports_.erase(reports_.begin() + static_cast<long>(idx));
+    ++devicesEvicted_;
+}
+
+void BLEScanner::enforceCaptureBudget(const std::string& keepMac) {
+    while (reports_.size() > 1 &&
+           blecore::captureBytes(reports_) > blecore::MAX_CAPTURE_BYTES) {
+        evictAt(blecore::lruIndex(reports_, keepMac));
+    }
 }
 
 uint32_t BLEScanner::getRegistryDropped() const {
@@ -234,33 +264,50 @@ void BLEScanner::onAdv(BLEAdvertisedDevice* adv) {
                                  md.length());
     }
 
+    const uint64_t now = millis();
+    const int rssi = adv->getRSSI();
+
     // Merge duplicate reports for the same MAC.
     for (auto& r : reports_) {
         if (r.mac == mac) {
-            r.rssi = adv->getRSSI();
+            r.rssi = rssi;
+            r.lastSeen = now;
             blecore::mergeReportFields(r, name, servicesHex, manufacturer);
+            const size_t before = r.payloadHistory.size();
             recordPayload(r.payloadHistory, r.count, seenPayloads_[r.mac], payloadHex);
             // MAC-independent registry: also record across all broadcasters.
             if (!payloadHex.empty()) {
-                blecore::recordRegistryPayload(payloadRegistry_, payloadHex, millis(),
+                blecore::recordRegistryPayload(payloadRegistry_, payloadHex, now,
                                               &registryDropped_);
+            }
+            // `r` may be invalidated by eviction below, so copy the key first.
+            if (r.payloadHistory.size() != before) {
+                std::string keep = r.mac;
+                enforceCaptureBudget(keep);
             }
             unlock();
             return;
         }
     }
 
-    // New device — enforce the device cap (FIFO eviction).
+    // New device: apply the capture filter, so ambient traffic cannot crowd
+    // the device of interest out of the capture.
+    if (!blecore::captureMatches(filter_, mac, rssi, servicesHex, manufacturer)) {
+        unlock();
+        return;
+    }
+
+    // Enforce the device cap: evict the least-recently-heard device.
     while (reports_.size() >= MAX_DEVICES) {
-        seenPayloads_.erase(reports_.front().mac);
-        reports_.erase(reports_.begin());
+        evictAt(blecore::lruIndex(reports_));
     }
 
     BLEAdvReport rep;
     rep.mac = mac;
-    rep.rssi = adv->getRSSI();
+    rep.rssi = rssi;
     rep.isConnectable = payloadIsConnectable(raw, rawLen);
-    rep.firstSeen = millis();
+    rep.firstSeen = now;
+    rep.lastSeen = now;
     rep.count = 0;
     rep.addrType = static_cast<uint8_t>(adv->getAddressType());
     rep.name = name;
@@ -272,9 +319,10 @@ void BLEScanner::onAdv(BLEAdvertisedDevice* adv) {
                   seenPayloads_[rep.mac], payloadHex);
     // MAC-independent registry: record the payload across all broadcasters.
     if (!payloadHex.empty()) {
-        blecore::recordRegistryPayload(payloadRegistry_, payloadHex, millis(),
+        blecore::recordRegistryPayload(payloadRegistry_, payloadHex, now,
                                               &registryDropped_);
     }
+    enforceCaptureBudget(mac);
     unlock();
 }
 

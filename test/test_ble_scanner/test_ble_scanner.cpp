@@ -403,6 +403,83 @@ void test_registry_counts_dropped_when_full(void) {
     TEST_ASSERT_EQUAL_UINT32(5, dropped);
 }
 
+// ---- capture buffer: LRU eviction, byte budget, capture filter (#10) --------
+
+static mcp::BLEAdvReport makeReport(const char* mac, uint64_t lastSeen) {
+    mcp::BLEAdvReport r;
+    r.mac = mac;
+    r.firstSeen = 1;
+    r.lastSeen = lastSeen;
+    return r;
+}
+
+void test_lru_evicts_least_recently_heard_not_first_seen(void) {
+    std::vector<mcp::BLEAdvReport> reports;
+    reports.push_back(makeReport("aa:00:00:00:00:01", 900));  // seen first, still active
+    reports.push_back(makeReport("aa:00:00:00:00:02", 100));  // gone quiet
+    reports.push_back(makeReport("aa:00:00:00:00:03", 500));
+    TEST_ASSERT_EQUAL(1, lruIndex(reports));
+}
+
+void test_lru_respects_exclude(void) {
+    std::vector<mcp::BLEAdvReport> reports;
+    reports.push_back(makeReport("aa:00:00:00:00:01", 100));
+    reports.push_back(makeReport("aa:00:00:00:00:02", 200));
+    TEST_ASSERT_EQUAL(1, lruIndex(reports, "aa:00:00:00:00:01"));
+    std::vector<mcp::BLEAdvReport> empty;
+    TEST_ASSERT_EQUAL(0, lruIndex(empty));
+}
+
+void test_capture_bytes_grows_with_history(void) {
+    mcp::BLEAdvReport r = makeReport("aa:00:00:00:00:01", 1);
+    size_t base = reportBytes(r);
+    r.payloadHistory.push_back(std::string(MAX_PAYLOAD_HEX, 'a'));
+    TEST_ASSERT_TRUE(reportBytes(r) >= base + MAX_PAYLOAD_HEX);
+    std::vector<mcp::BLEAdvReport> reports{r, r};
+    TEST_ASSERT_EQUAL(2 * reportBytes(r), captureBytes(reports));
+}
+
+void test_budget_bounds_worst_case_capture(void) {
+    // A device holding a full deep history must fit the budget on its own,
+    // otherwise enforcement could never get under it.
+    mcp::BLEAdvReport r = makeReport("aa:00:00:00:00:01", 1);
+    for (size_t i = 0; i < MAX_PAYLOADS; ++i) r.payloadHistory.push_back(std::string(MAX_PAYLOAD_HEX, 'a'));
+    TEST_ASSERT_TRUE(reportBytes(r) < MAX_CAPTURE_BYTES);
+    // ...but MAX_DEVICES such devices would not, which is why the budget exists.
+    TEST_ASSERT_TRUE(reportBytes(r) * MAX_DEVICES > MAX_CAPTURE_BYTES);
+}
+
+void test_capture_filter_default_matches_everything(void) {
+    CaptureFilter f;
+    TEST_ASSERT_FALSE(f.active());
+    TEST_ASSERT_TRUE(captureMatches(f, "AA:BB:CC:DD:EE:FF", -100, "", ""));
+}
+
+void test_capture_filter_min_rssi(void) {
+    CaptureFilter f; f.minRssi = -60;
+    TEST_ASSERT_TRUE(f.active());
+    TEST_ASSERT_TRUE(captureMatches(f, "aa:bb:cc:dd:ee:ff", -60, "", ""));
+    TEST_ASSERT_FALSE(captureMatches(f, "aa:bb:cc:dd:ee:ff", -61, "", ""));
+}
+
+void test_capture_filter_manufacturer_prefix_little_endian(void) {
+    CaptureFilter f; f.manufacturerPrefix = "adde";   // company id 0xDEAD
+    TEST_ASSERT_TRUE(captureMatches(f, "aa:bb:cc:dd:ee:ff", -50, "", "ADDEBEAF"));
+    TEST_ASSERT_FALSE(captureMatches(f, "aa:bb:cc:dd:ee:ff", -50, "", "4c001006"));
+    TEST_ASSERT_FALSE(captureMatches(f, "aa:bb:cc:dd:ee:ff", -50, "", ""));
+}
+
+void test_capture_filter_service_and_mac_prefix(void) {
+    CaptureFilter f;
+    f.serviceUuid = "6e400001";
+    f.macPrefix = "f0:68";
+    TEST_ASSERT_TRUE(captureMatches(f, "F0:68:E3:B3:40:B7", -50,
+                                    "6E400001-b5a3-f393-e0a9-e50e24dcca9e", ""));
+    TEST_ASSERT_FALSE(captureMatches(f, "d7:2f:77:38:f1:eb", -50,
+                                     "6e400001-b5a3-f393-e0a9-e50e24dcca9e", ""));
+    TEST_ASSERT_FALSE(captureMatches(f, "f0:68:e3:b3:40:b7", -50, "180f", ""));
+}
+
 int runUnityTests(void) {
     UNITY_BEGIN();
     RUN_TEST(test_hex_encode_basic);
@@ -442,6 +519,14 @@ int runUnityTests(void) {
     RUN_TEST(test_merge_fills_name_from_scan_response);
     RUN_TEST(test_merge_does_not_overwrite_known_fields);
     RUN_TEST(test_registry_counts_dropped_when_full);
+    RUN_TEST(test_lru_evicts_least_recently_heard_not_first_seen);
+    RUN_TEST(test_lru_respects_exclude);
+    RUN_TEST(test_capture_bytes_grows_with_history);
+    RUN_TEST(test_budget_bounds_worst_case_capture);
+    RUN_TEST(test_capture_filter_default_matches_everything);
+    RUN_TEST(test_capture_filter_min_rssi);
+    RUN_TEST(test_capture_filter_manufacturer_prefix_little_endian);
+    RUN_TEST(test_capture_filter_service_and_mac_prefix);
     return UNITY_END();
 }
 
