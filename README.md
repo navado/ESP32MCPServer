@@ -21,7 +21,7 @@ Connect an AI agent directly to your hardware: query I2C sensors, parse NMEA 018
 | **OBD-II / CAN** | Standard 11-bit OBD-II service 01/09 PID decoding (60+ PIDs) |
 | **Bus History** | Persistent ring buffers for CAN, NMEA, NMEA 2000, OBD-II — queryable via MCP |
 | **Bus Readers** | Time-bounded serial and CAN reads, raw or parsed mode, JSON output |
-| **Bluetooth (BLE)** | Active advertising scanner (raw payload capture + history) and GATT enumeration — queryable via MCP |
+| **Bluetooth (BLE)** | BLE central over MCP (ESP32-S3): non-blocking advertising scanner with raw payload history and capture filters, GATT client (connect to public *and* random addresses, enumerate services, read values, capture notifications) — see [Bluetooth (BLE)](#bluetooth-ble) |
 | **WiFi** | AP setup UI + STA mode; credentials stored in NVS |
 | **Discovery** | mDNS (`_mcp._tcp`) + UDP capability broadcast |
 | **Metrics** | Heap, uptime, RSSI, histogram stats with boot persistence |
@@ -71,7 +71,7 @@ An explicit `ramBudgetBytes` in the bus-history config still takes precedence.
 | Feature | ESP32-S3 | ESP32 V4 | ESP32-C3 | HUZZAH32 | M5Stack | nRF52840-DK | nRF52840-Feather |
 |---|---|---|---|---|---|---|---|
 | WiFi | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ |
-| BLE | ✓ | ✗¹ | ✗¹ | ✗¹ | ✗¹ | ✓ | ✓ |
+| BLE via MCP (`ble/*`) | ✓ | ✗¹ | ✗¹ | ✗¹ | ✗¹ | ✗³ | ✗³ |
 | CAN / TWAI | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ | ✗ |
 | I2C | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | UART (ext) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
@@ -79,6 +79,8 @@ An explicit `ramBudgetBytes` in the bus-history config still takes precedence.
 | MCP Server | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ |
 | Bus History | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ |
 | mDNS / UDP discovery | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ |
+
+³ The nRF52840 has a BLE radio, but the nRF52 firmware (`main_nrf.cpp`) does not use it; there is no MCP server on those targets.
 
 ---
 
@@ -546,13 +548,30 @@ After subscribing the server pushes unsolicited `notifications/resources/updated
 
 ### Bluetooth (BLE)
 
-Active BLE advertising capture for reverse-engineering broadcast formats, plus optional GATT enumeration.  Scans are **non-blocking**: start a scan, wait, then fetch results.
+The ESP32-S3 acts as a **BLE central** controlled over MCP: it captures what nearby devices broadcast (useful for reverse-engineering advertising formats) and can connect to a device to enumerate and read its GATT database.  Every call is **non-blocking or time-bounded**, so a slow or misbehaving peer can never hang the MCP server.
 
-> BLE is currently built for the ESP32-S3 target only (8 MB flash).  On the 4 MB-flash boards the BLE stack cannot fit alongside the WebSocket server and OTA, so the `ble/*` methods are not compiled there.
+**Supported boards:** `esp32-s3-devkitc-1` and `esp32-s3-devkitc-1-n16r8` (PSRAM).  On the 4 MB-flash boards the BLE stack cannot fit alongside the WebSocket server and OTA, so the `ble/*` methods are not compiled there; the nRF52 targets have no MCP server.
+
+#### Capabilities
+
+| Area | What it does |
+|---|---|
+| **Advertising scan** | Active scan (requests scan responses) for a fixed duration or continuously; per device: MAC, address type, name, RSSI, advertised services, manufacturer data, connectable flag, first/last seen |
+| **Payload history** | Distinct raw payloads per device (up to 64, oldest dropped first) — payload changes reveal state changes in the broadcaster |
+| **Payload registry** | Distinct payloads across *all* devices, independent of MAC — survives phones and trackers that rotate their MAC address |
+| **Capture filters** | `minRssi`, `manufacturerId`, `serviceUuid`, `macPrefix` decide what is stored, so the device of interest is not crowded out in a busy RF environment |
+| **Connect** | Asynchronous GATT connect with an enforced timeout; public, random static and resolvable private addresses (address type taken from the scan, or given explicitly); repeatable connect / disconnect / reconnect |
+| **Enumerate & read** | All primary/secondary services and characteristics with properties; every readable value read (hex + printable text) |
+| **Notifications** | Subscribes to notify/indicate characteristics and captures the latest value within a bounded window (≤ 10 s) |
+| **Memory-aware limits** | Capture limits follow the boot-time memory plan: 64 devices / 48 KB with PSRAM, 24 devices / 16 KB without; least-recently-heard devices are evicted first |
+
+**Not supported (yet):** writing characteristics, pairing/bonding (encrypted characteristics will fail to read), more than one connection at a time, BLE 5 extended advertising and Coded PHY (only legacy advertising is received), and acting as a peripheral/advertiser.
+
+**Verified on hardware** (ESP32-S3-DevKitC-1 N16R8) against an nRF52840 peripheral (random static address), an Android phone (rotating random address) and a BlueZ peripheral (public address): connect median 0.43 s (15/15), 47 connect/disconnect cycles with clean teardown on the peer, full enumeration of a phone (7 services / 37 characteristics) with ≥ 49 KB internal heap free throughout.
 
 | Method | Params | Description |
 |---|---|---|
-| `ble/scan` | `durationMs?`, `minRssi?`, `manufacturerId?`, `serviceUuid?`, `macPrefix?` | Start a scan (default 5000 ms; 0 = continuous until `ble/scan/stop`); returns immediately. If a scan is already running: `{started:false, scanning:true, remainingMs}`. The optional **capture filter** decides which devices are *stored* (AND-combined; `manufacturerId` is a hex prefix of the manufacturer data with the company id little-endian, e.g. `0xDEAD` → `"adde"`), so ambient traffic cannot crowd out the device of interest. Up to 32 devices are kept within a 32 KB capture budget; when full, the least-recently-heard device is evicted |
+| `ble/scan` | `durationMs?`, `minRssi?`, `manufacturerId?`, `serviceUuid?`, `macPrefix?` | Start a scan (default 5000 ms; 0 = continuous until `ble/scan/stop`); returns immediately. If a scan is already running: `{started:false, scanning:true, remainingMs}`. The optional **capture filter** decides which devices are *stored* (AND-combined; `manufacturerId` is a hex prefix of the manufacturer data with the company id little-endian, e.g. `0xDEAD` → `"adde"`), so ambient traffic cannot crowd out the device of interest. Device count and capture size follow the boot-time memory plan (64 devices / 48 KB with PSRAM, 24 / 16 KB without); when full, the least-recently-heard device is evicted |
 | `ble/scan/results` | `mac?`, `serviceUuid?`, `manufacturerId?`, `macPrefix?` | Stop the scan (if running) and return captured devices; optional case-insensitive `mac` returns only that device with its **full** payload history; optional AND-combined response filters (`serviceUuid`, `manufacturerId` hex, `macPrefix`) never affect capture. Also returns `evicted` (devices dropped this scan to stay within the limits), `maxDevices`, and per-device `lastSeen` |
 | `ble/scan/payloads` | — | Stop the scan and return the **MAC-independent payload registry**: distinct payloads across ALL broadcasters, first-seen order, with `count` + `firstSeen`/`lastSeen` (ms since scan start), plus `dropped`: distinct payloads discarded because the registry (64 entries) was full. The primary artifact for protocol reverse-engineering — survives per-MAC MAC-rotation churn |
 | `ble/scan/poll` | — | Live read of the payload registry WITHOUT stopping the scan (stateless; diff by `firstSeen`) |
@@ -595,7 +614,7 @@ Active BLE advertising capture for reverse-engineering broadcast formats, plus o
 ```
 
 Notes for reverse engineering:
-- `payloadHistory` holds the **distinct raw payloads** (oldest → newest) seen per device, bounded to 64 retained entries (device count bounded to 12, payloads capped at 64 bytes each).  A change between entries is a state change in the broadcaster (e.g. a button press or level change).  When the bound is reached the oldest entry is dropped; `count` is the number of distinct payloads currently retained.
+- `payloadHistory` holds the **distinct raw payloads** (oldest → newest) seen per device, bounded to 64 retained entries (payloads capped at 64 bytes each; the device count and total capture size follow the boot-time memory plan).  A change between entries is a state change in the broadcaster (e.g. a button press or level change).  When the bound is reached the oldest entry is dropped; `count` is the number of distinct payloads currently retained.
 - The unfiltered `ble/scan/results` response serialises only the **newest 4** payloads per device (`count` still reports the true distinct total, so `payloadHistory` length may be less than `count`).  Pass the optional `mac` param (case-insensitive) to fetch a single device's **full** history — e.g. `ble/scan/results` with `{"mac":"62:38:e6:6b:1c:f9"}`.  This keeps the quick-look response small even when the BLE radio is flooded while preserving deep per-device capture for protocol reverse-engineering.
 - `manufacturer` contains the manufacturer-specific data as hex — company ID is the first two bytes (little-endian).  The example payload above uses manufacturer ID `0xFF00` and the 8-byte prefix `6D B6 43 CE 97 FE 42 7C` (a broadcast-controlled toy protocol), with `D5 96 4C` → `C1 BA 0B` showing a state change.
 - `isConnectable` is a heuristic from the BLE flags AD type; absent/malformed flags default to connectable.
@@ -606,7 +625,7 @@ Notes for reverse engineering:
 {"jsonrpc":"2.0","method":"ble/connect","id":16,"params":{"mac":"00:1b:66:c6:da:c8","timeoutMs":5000}}
 ```
 ```json
-{"jsonrpc":"2.0","id":16,"result":{"started":true,"connecting":true,"connected":false}}
+{"jsonrpc":"2.0","id":16,"result":{"started":true,"connecting":true,"connected":false,"addrType":"public"}}
 ```
 
 `ble/connect` returns immediately; the open handshake completes in the background within `timeoutMs` (the parameter is enforced).  Poll for the outcome:
