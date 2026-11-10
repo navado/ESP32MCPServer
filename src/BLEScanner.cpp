@@ -124,7 +124,10 @@ bool BLEScanner::startScan(uint32_t durationMs) {
     // per-device payload history can capture payload changes.  The library
     // frees each BLEAdvertisedDevice after onResult() returns, so the heap
     // stays bounded even on a busy radio environment.
-    scan->setAdvertisedDeviceCallbacks(new ScannerCallback(this), true);
+    // The library stores the raw pointer and never frees it; allocate the
+    // callback once instead of leaking a new one on every scan.
+    static ScannerCallback* callback = new ScannerCallback(this);
+    scan->setAdvertisedDeviceCallbacks(callback, true);
     // Active scan requests scan responses (more data, e.g. names).
     scan->setActiveScan(true);
     scan->setInterval(100);
@@ -298,8 +301,11 @@ bool BLEScanner::connect(const std::string& mac, uint32_t timeoutMs) {
     hasPeer_ = true;
     connectTimeoutMs_ = timeoutMs;
     openIssued_ = false;
-    registerIssued_ = false;
-    appRegistered_ = false;
+    // The GATT app registration survives across connections, and registering
+    // the same app id again fails with ESP_GATT_ERROR (REG_EVT not OK), which
+    // would leave appRegistered_ false and stall the open until timeout.  Only
+    // re-issue the registration if no successful REG_EVT has been seen yet.
+    if (!appRegistered_) registerIssued_ = false;
     closeIssued_ = false;
     gattState_ = GattState::Connecting;
     stateStartMillis_ = millis();
@@ -364,6 +370,7 @@ std::vector<BLEServiceInfo> BLEScanner::getServicesResults(uint32_t notifyCaptur
     // Wait for the enumeration to finish (bounded: 10 s discovery cap, then
     // `notifyCaptureMs` for notified values).  Blocking here is fine — this is
     // the caller's explicit results request.
+    notifyCaptureMs = gattcore::clampNotifyCaptureMs(notifyCaptureMs);
     lock();
     uint32_t waited = 0;
     const uint32_t enumLimit = notifyCaptureMs + DISCOVERY_TIMEOUT_MS;
@@ -541,15 +548,20 @@ void BLEScanner::gattTaskBody() {
                 break;
         }
         bool idle = (st == GattState::Idle);
+        if (idle) {
+            // Clear the handle in the SAME critical section that observed
+            // Idle.  Releasing the lock first would let connect()/disconnect()
+            // move the state out of Idle, see a non-null handle, skip
+            // ensureGattTask(), and leave the state machine with no task to
+            // drive it (permanently wedged until reboot).
+            gattTaskHandle_ = nullptr;
+        }
         unlock();
 
         if (idle) break;  // all work done — exit the task
         delay(20);
     }
 
-    lock();
-    gattTaskHandle_ = nullptr;
-    unlock();
     vTaskDelete(nullptr);
 }
 

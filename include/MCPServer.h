@@ -58,6 +58,11 @@ public:
     // MockWebSocket::simulateMessage().
     std::string processMessage(uint8_t clientId, const std::string& json);
 
+    // Forget all per-client state (subscriptions) for `clientId`.  Called when
+    // a WebSocket client disconnects: the library reuses client slot numbers,
+    // so a new client must not inherit the previous occupant's subscriptions.
+    void removeClient(uint8_t clientId);
+
     // Override the transport used for push notifications.
     void setSendFunc(SendFunc fn) { sendFunc_ = fn; }
 

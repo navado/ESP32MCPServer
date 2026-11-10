@@ -41,6 +41,16 @@ constexpr uint32_t DISCOVERY_TIMEOUT_MS      = 10000;  // whole service discover
 constexpr uint32_t NOTIFY_CAPTURE_TIMEOUT_MS = 3000;   // capture window
 constexpr uint32_t CLOSE_TIMEOUT_MS          = 2000;   // close handshake
 
+// Upper bound for the client-supplied notifyCaptureMs.  ble/services/results
+// blocks the MCP task while it waits, so an unbounded value would stall the
+// WebSocket loop (and every other client) for as long as the caller asked.
+constexpr uint32_t MAX_NOTIFY_CAPTURE_MS     = 10000;
+
+inline uint32_t clampNotifyCaptureMs(uint32_t requestedMs) {
+    return requestedMs > MAX_NOTIFY_CAPTURE_MS ? MAX_NOTIFY_CAPTURE_MS
+                                               : requestedMs;
+}
+
 // A UUID in the byte layout Bluedroid uses: 16-bit and 32-bit UUIDs are
 // scalar values (host-endian, e.g. 0x1800); 128-bit UUIDs are little-endian
 // bytes with u128[0] as the LEAST significant byte (matching the Arduino BLE

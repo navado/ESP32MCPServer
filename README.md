@@ -548,7 +548,7 @@ Active BLE advertising capture for reverse-engineering broadcast formats, plus o
 | `ble/connect/results` | — | Poll the outcome of the last async connect |
 | `ble/disconnect` | — | Drop the GATT link |
 | `ble/services/start` | — | Enumerate services/characteristics (background task); returns immediately |
-| `ble/services/results` | `notifyCaptureMs?` | Wait for enumeration + notified values (default 3000 ms) |
+| `ble/services/results` | `notifyCaptureMs?` | Wait for enumeration + notified values (default 3000 ms, capped at 10000 ms) |
 | `ble/services/stop` | — | Unsubscribe from notifications and close the link |
 
 #### `ble/scan` / `ble/scan/results`
@@ -623,7 +623,7 @@ Notes for reverse engineering:
 }
 ```
 
-GATT enumeration runs in the background so a slow or uncooperative peer cannot block the MCP server.  Every operation is time-bounded: the open handshake (`timeoutMs`), service discovery (10 s cap), characteristic reads (5 s per read), and the notified-value capture window (`notifyCaptureMs`, default 3000 ms).  `ble/services/stop` (or `ble/disconnect`) closes the link, tearing down any in-flight work safely.
+GATT enumeration runs in the background so a slow or uncooperative peer cannot block the MCP server.  Every operation is time-bounded: the open handshake (`timeoutMs`), service discovery (10 s cap), characteristic reads (5 s for the whole read phase), and the notified-value capture window (`notifyCaptureMs`, default 3000 ms, capped at 10000 ms because the call blocks the MCP task while it waits).  `ble/services/stop` (or `ble/disconnect`) closes the link, tearing down any in-flight work safely.
 
 ### TypeScript client example
 

@@ -119,6 +119,20 @@ void test_properties_all_flags(void) {
         propertiesString(0xFF).c_str());
 }
 
+void test_notify_capture_clamp_passes_small_values(void) {
+    TEST_ASSERT_EQUAL_UINT32(0, clampNotifyCaptureMs(0));
+    TEST_ASSERT_EQUAL_UINT32(3000, clampNotifyCaptureMs(3000));
+    TEST_ASSERT_EQUAL_UINT32(MAX_NOTIFY_CAPTURE_MS,
+                             clampNotifyCaptureMs(MAX_NOTIFY_CAPTURE_MS));
+}
+
+void test_notify_capture_clamp_caps_large_values(void) {
+    TEST_ASSERT_EQUAL_UINT32(MAX_NOTIFY_CAPTURE_MS,
+                             clampNotifyCaptureMs(600000));
+    TEST_ASSERT_EQUAL_UINT32(MAX_NOTIFY_CAPTURE_MS,
+                             clampNotifyCaptureMs(0xFFFFFFFFu));
+}
+
 void test_properties_none_empty(void) {
     TEST_ASSERT_EQUAL_STRING("", propertiesString(0).c_str());
 }
@@ -141,6 +155,8 @@ int runUnityTests(void) {
     RUN_TEST(test_properties_read_notify);
     RUN_TEST(test_properties_all_flags);
     RUN_TEST(test_properties_none_empty);
+    RUN_TEST(test_notify_capture_clamp_passes_small_values);
+    RUN_TEST(test_notify_capture_clamp_caps_large_values);
     return UNITY_END();
 }
 
