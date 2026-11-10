@@ -73,8 +73,13 @@ public:
     // Capture filter of the current/last scan.
     blecore::CaptureFilter getCaptureFilter() const;
 
-    // Devices evicted (LRU) this scan to respect MAX_DEVICES / MAX_CAPTURE_BYTES.
+    // Devices evicted (LRU) this scan to respect the capture limits.
     uint32_t getDevicesEvicted() const;
+
+    // Capture limits, set once at boot from the MemoryPlan.  maxDevices is
+    // clamped to [1, blecore::MAX_DEVICES_LIMIT].
+    void setCaptureLimits(size_t maxDevices, size_t maxBytes);
+    size_t getMaxDevices() const;
 
     // Stop a running scan.  Safe to call from a normal task context.
     void stopScan();
@@ -196,6 +201,8 @@ private:
     std::vector<BLEPayloadEntry> payloadRegistry_;
     uint32_t registryDropped_ = 0;
     uint32_t devicesEvicted_ = 0;
+    size_t maxDevices_ = blecore::MAX_DEVICES;
+    size_t maxCaptureBytes_ = blecore::MAX_CAPTURE_BYTES;
     blecore::CaptureFilter filter_;
     uint8_t peerAddrType_ = 0;     // blecore::ADDR_TYPE_* of the connect target
     uint64_t scanStartedAt_ = 0;   // millis() at scan start

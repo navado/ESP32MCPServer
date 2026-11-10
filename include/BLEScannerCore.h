@@ -79,7 +79,8 @@ namespace blecore {
 // payloads per device (count reports the true distinct total), keeping the
 // unfiltered response the proven-safe size even under a flooded radio; the
 // full history is available per-MAC via ble/scan/results?mac=.
-constexpr size_t MAX_DEVICES       = 32;   // tracked MACs per scan
+constexpr size_t MAX_DEVICES       = 32;   // default tracked MACs per scan
+constexpr size_t MAX_DEVICES_LIMIT = 64;   // upper bound for runtime limits (MemoryPlan)
 constexpr size_t MAX_PAYLOADS      = 64;   // distinct payloads per MAC (deep)
 constexpr size_t MAX_PAYLOADS_VIEW = 4;    // payloads serialised by the unfiltered endpoint
 // Cap on the length of a single stored payload.  Payloads longer than this are

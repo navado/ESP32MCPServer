@@ -56,6 +56,10 @@ jobs:
             platform: esp32
             artifact: firmware-esp32s3-devkitc1
 
+          - env: esp32-s3-devkitc-1-n16r8
+            platform: esp32
+            artifact: firmware-esp32s3-devkitc1-n16r8
+
           - env: esp32-devkitc
             platform: esp32
             artifact: firmware-esp32-devkitc

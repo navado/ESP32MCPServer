@@ -12,7 +12,6 @@
 
 namespace mcp {
 
-using blecore::MAX_DEVICES;
 using blecore::hexEncode;
 using blecore::hexToAscii;
 using blecore::payloadIsConnectable;
@@ -194,9 +193,25 @@ void BLEScanner::evictAt(size_t idx) {
     ++devicesEvicted_;
 }
 
+void BLEScanner::setCaptureLimits(size_t maxDevices, size_t maxBytes) {
+    if (maxDevices < 1) maxDevices = 1;
+    if (maxDevices > blecore::MAX_DEVICES_LIMIT) maxDevices = blecore::MAX_DEVICES_LIMIT;
+    lock();
+    maxDevices_ = maxDevices;
+    maxCaptureBytes_ = maxBytes;
+    unlock();
+}
+
+size_t BLEScanner::getMaxDevices() const {
+    lock();
+    size_t n = maxDevices_;
+    unlock();
+    return n;
+}
+
 void BLEScanner::enforceCaptureBudget(const std::string& keepMac) {
     while (reports_.size() > 1 &&
-           blecore::captureBytes(reports_) > blecore::MAX_CAPTURE_BYTES) {
+           blecore::captureBytes(reports_) > maxCaptureBytes_) {
         evictAt(blecore::lruIndex(reports_, keepMac));
     }
 }
@@ -298,7 +313,7 @@ void BLEScanner::onAdv(BLEAdvertisedDevice* adv) {
     }
 
     // Enforce the device cap: evict the least-recently-heard device.
-    while (reports_.size() >= MAX_DEVICES) {
+    while (reports_.size() >= maxDevices_) {
         evictAt(blecore::lruIndex(reports_));
     }
 

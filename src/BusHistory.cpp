@@ -16,19 +16,23 @@ static uint32_t platformFreeHeap() {
 #  ifndef BOARD_BUS_HISTORY_HEAP_CAP
 #    define BOARD_BUS_HISTORY_HEAP_CAP 0  // 0 = use full free heap (legacy behaviour)
 #  endif
+// Runtime memory policy (set from the boot-time MemoryPlan before begin()).
+// Defaults reproduce the compile-time board behaviour.
+static bool     g_busHistoryInPsram = false;
+static uint32_t g_busHistoryCap     = BOARD_BUS_HISTORY_HEAP_CAP;
+
 static uint32_t platformFreeHeap() {
     // Cap the auto-config budget so Bluetooth has heap headroom.  Without a
     // cap, BusHistory grabs freeHeap - 64KB which starves BLE (controller +
     // workqueue + scan allocations) and causes bad_alloc inside the scan
     // callback / BTU_StartUp failures (observed on ESP32-S3, 320KB internal
-    // RAM).  Per-board value via BOARD_BUS_HISTORY_HEAP_CAP; 0 = uncapped.
-    uint32_t freeHeap = static_cast<uint32_t>(ESP.getFreeHeap());
-#if BOARD_BUS_HISTORY_HEAP_CAP > 0
-    return freeHeap < BOARD_BUS_HISTORY_HEAP_CAP ? freeHeap
-                                                 : BOARD_BUS_HISTORY_HEAP_CAP;
-#else
+    // RAM).  With PSRAM the ring buffers (large allocations) are placed there,
+    // so the budget is measured against free PSRAM instead.  0 = uncapped.
+    uint32_t freeHeap = g_busHistoryInPsram
+                            ? static_cast<uint32_t>(ESP.getFreePsram())
+                            : static_cast<uint32_t>(ESP.getFreeHeap());
+    if (g_busHistoryCap > 0 && freeHeap > g_busHistoryCap) return g_busHistoryCap;
     return freeHeap;
-#endif
 }
 #endif
 
@@ -39,6 +43,16 @@ namespace mcp {
 // ---------------------------------------------------------------------------
 uint32_t BusHistory::freeHeapBytes() {
     return platformFreeHeap();
+}
+
+void BusHistory::setMemoryPolicy(bool inPsram, uint32_t heapCap) {
+#ifndef NATIVE_TEST
+    g_busHistoryInPsram = inPsram;
+    g_busHistoryCap = heapCap;
+#else
+    (void)inPsram;
+    (void)heapCap;
+#endif
 }
 
 // ---------------------------------------------------------------------------

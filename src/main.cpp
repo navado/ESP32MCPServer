@@ -11,6 +11,11 @@
 #include "BusHistory.h"
 #include "OTAManager.h"
 #include "BLEScanner.h"
+#include "MemoryPlan.h"
+
+#ifndef BOARD_BUS_HISTORY_HEAP_CAP
+#define BOARD_BUS_HISTORY_HEAP_CAP 0
+#endif
 
 // ---------------------------------------------------------------------------
 // Minimal ESP32 I2C implementation (wraps Arduino Wire library)
@@ -169,6 +174,23 @@ void setup() {
 #if BOARD_HAS_BLE
     bleScanner.begin();
 #endif
+
+    // Decide how bus history and BLE capture share memory, based on what this
+    // board actually has (PSRAM detected at runtime).  Must run before
+    // BUS_HISTORY.begin() allocates its ring buffers.
+    {
+        const mcp::mem::MemoryPlan plan = mcp::mem::planMemory(
+            psramFound(), static_cast<uint32_t>(ESP.getFreePsram()),
+            BOARD_HAS_BLE != 0, BOARD_BUS_HISTORY_HEAP_CAP);
+        mcp::BusHistory::setMemoryPolicy(plan.busHistoryInPsram, plan.busHistoryCap);
+#if BOARD_HAS_BLE
+        bleScanner.setCaptureLimits(plan.bleMaxDevices, plan.bleCaptureBytes);
+#endif
+        Serial.printf("[mem] plan=%s psram=%u busHistoryCap=%u bleDevices=%u bleBytes=%u\n",
+                      mcp::mem::modeName(plan.mode), (unsigned)ESP.getFreePsram(),
+                      (unsigned)plan.busHistoryCap, (unsigned)plan.bleMaxDevices,
+                      (unsigned)plan.bleCaptureBytes);
+    }
 
     // Initialize LittleFS
     if (!LittleFS.begin(true)) {
@@ -502,7 +524,7 @@ void setup() {
             if (startAt != 0) doc["result"]["scanStartedMs"] = millis() - startAt;
             if (dur != 0 || startAt != 0) doc["result"]["durationMs"] = dur;
             doc["result"]["evicted"] = bleScanner.getDevicesEvicted();
-            doc["result"]["maxDevices"] = mcp::blecore::MAX_DEVICES;
+            doc["result"]["maxDevices"] = bleScanner.getMaxDevices();
             JsonArray arr = doc["result"]["devices"].to<JsonArray>();
             for (const auto& r : reports) {
                 if (!macFilter.empty()) {

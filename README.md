@@ -36,13 +36,26 @@ Connect an AI agent directly to your hardware: query I2C sensors, parse NMEA 018
 
 | Board | PlatformIO env | MCU | Flash | RAM | WiFi | BLE | CAN | RGB LED |
 |---|---|---|---|---|---|---|---|---|
-| **ESP32-S3-DevKitC-1** | `esp32-s3-devkitc-1` | Xtensa LX7 × 2 @ 240 MHz | 8 MB | 512 KB + 8 MB PSRAM | ✓ | 5.0 | ✓ | GPIO48 |
+| **ESP32-S3-DevKitC-1** | `esp32-s3-devkitc-1` | Xtensa LX7 × 2 @ 240 MHz | 8 MB | 512 KB (PSRAM not used²) | ✓ | 5.0 | ✓ | GPIO48 |
+| **ESP32-S3-DevKitC-1 N16R8 / N8R8** | `esp32-s3-devkitc-1-n16r8` | Xtensa LX7 × 2 @ 240 MHz | 8–16 MB | 512 KB + 8 MB octal PSRAM | ✓ | 5.0 | ✓ | GPIO48 |
 | **ESP32-DevKitC V4** | `esp32-devkitc` | Xtensa LX6 × 2 @ 240 MHz | 4 MB | 520 KB | ✓ | ✗¹ | ✓ | — |
 | **ESP32-C3-DevKitM-1** | `esp32-c3-devkitm-1` | RISC-V @ 160 MHz | 4 MB | 400 KB | ✓ | ✗¹ | ✓ | GPIO8 |
 | **Adafruit HUZZAH32** | `adafruit-huzzah32` | Xtensa LX6 × 2 @ 240 MHz | 4 MB | 520 KB | ✓ | ✗¹ | ✓ | — |
 | **M5Stack Core ESP32** | `m5stack-core` | Xtensa LX6 × 2 @ 240 MHz | 16 MB | 520 KB | ✓ | ✗¹ | ✗ | — |
 
 ¹ 4 MB-flash boards: the BLE stack + the MCP WebSocket server + OTA cannot all fit the 1.25 MB OTA app slot, so BLE is compiled out (the hardware still supports it). BLE is available on the ESP32-S3 (8 MB flash).
+
+² PSRAM mode (octal vs quad) is fixed at build time, so modules with 8 MB octal PSRAM (N8R8/N16R8; `esptool.py chip_id` reports "Embedded PSRAM 8MB") need the `-n16r8` env. Do not flash that env on DevKitC-1 variants without PSRAM or with quad PSRAM (N8R2).
+
+**Boot-time memory plan.** At startup the firmware checks for PSRAM and divides memory between bus history and BLE capture accordingly (`include/MemoryPlan.h`; logged as `[mem] plan=…` on the serial console):
+
+| Detected at boot | Bus history | BLE capture |
+|---|---|---|
+| PSRAM | budgeted from PSRAM (min of 1 MB and ¼ of free PSRAM) | 64 devices / 48 KB |
+| No PSRAM, BLE enabled | internal heap, capped at 96 KB | 24 devices / 16 KB |
+| No PSRAM, BLE disabled | internal heap, board cap (`BOARD_BUS_HISTORY_HEAP_CAP`) | — |
+
+An explicit `ramBudgetBytes` in the bus-history config still takes precedence.
 
 ### nRF52840 Boards — Sensor Only (I2C + Serial, no WiFi)
 
