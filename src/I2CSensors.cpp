@@ -41,6 +41,7 @@ SensorReading I2CSensorDriver::make(const std::string& param, double value,
 std::vector<uint8_t> knownI2CAddresses() {
     return {
         0x23, 0x5C,         // BH1750
+        0x38,               // AHT20
         0x40, 0x41, 0x42, 0x43, 0x44, 0x45, // INA219 (0x40..0x4F) + SHT31 (0x44,0x45)
         0x48, 0x49, 0x4A, 0x4B, // ADS1115
         0x68, 0x69,         // MPU6050
@@ -64,6 +65,8 @@ std::unique_ptr<I2CSensorDriver> createI2CDriver(I2CInterface& bus,
         return std::make_unique<INA219Driver>(bus, address);
     case 0x23: case 0x5C:
         return std::make_unique<BH1750Driver>(bus, address);
+    case 0x38:
+        return std::make_unique<AHT20Driver>(bus, address);
     default:
         return nullptr;
     }
@@ -329,6 +332,39 @@ std::vector<SensorReading> ADS1115Driver::read() {
 // ---------------------------------------------------------------------------
 // SHT31
 // ---------------------------------------------------------------------------
+
+AHT20Driver::AHT20Driver(I2CInterface& bus, uint8_t addr)
+    : I2CSensorDriver(bus, addr) {}
+
+bool AHT20Driver::probe() {
+    return bus_.devicePresent(address_);
+}
+
+bool AHT20Driver::init() {
+    if (!probe()) return false;
+    bus_.delayMs(40);
+    uint8_t p[2] = {0x08, 0x00};
+    bus_.writeBytes(address_, 0xBE, p, 2);
+    bus_.delayMs(20);
+    initialized_ = true;
+    return true;
+}
+
+std::vector<SensorReading> AHT20Driver::read() {
+    std::vector<SensorReading> out;
+    if (!initialized_) return out;
+    uint8_t p[2] = {0x33, 0x00};
+    bus_.writeBytes(address_, 0xAC, p, 2);
+    bus_.delayMs(85);
+    uint8_t b[7] = {};
+    if (bus_.readRaw(address_, b, 7) < 7) return out;
+    if (b[0] & 0x80) return out;
+    uint32_t hRaw = ((uint32_t)b[1] << 12) | ((uint32_t)b[2] << 4) | (b[3] >> 4);
+    uint32_t tRaw = ((uint32_t)(b[3] & 0x0F) << 16) | ((uint32_t)b[4] << 8) | b[5];
+    out.push_back(make("temperature", tRaw * 200.0 / 1048576.0 - 50.0, "°C"));
+    out.push_back(make("humidity", hRaw * 100.0 / 1048576.0, "%"));
+    return out;
+}
 
 SHT31Driver::SHT31Driver(I2CInterface& bus, uint8_t addr)
     : I2CSensorDriver(bus, addr) {}

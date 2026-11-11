@@ -46,6 +46,34 @@ void test_factory_sht31() {
     TEST_ASSERT_EQUAL_STRING("SHT31", drv->name());
 }
 
+void test_factory_aht20() {
+    bus.addDevice(0x38);
+    auto drv = createI2CDriver(bus, 0x38);
+    TEST_ASSERT_NOT_NULL(drv.get());
+    TEST_ASSERT_EQUAL_STRING("AHT20", drv->name());
+}
+
+void test_aht20_read_temp_hum() {
+    bus.addDevice(0x38);
+    // 25 C -> raw = (25+50)/200 * 2^20 ; 50 %RH -> raw = 0.5 * 2^20
+    uint32_t t = static_cast<uint32_t>((25.0 + 50.0) / 200.0 * 1048576.0);
+    uint32_t h = static_cast<uint32_t>(0.5 * 1048576.0);
+    uint8_t raw[7] = {0x1C,
+        static_cast<uint8_t>(h >> 12), static_cast<uint8_t>(h >> 4),
+        static_cast<uint8_t>(((h & 0x0F) << 4) | ((t >> 16) & 0x0F)),
+        static_cast<uint8_t>(t >> 8), static_cast<uint8_t>(t & 0xFF), 0};
+    bus.setRawRead(0x38, raw, 7);
+
+    AHT20Driver drv(bus, 0x38);
+    TEST_ASSERT_TRUE(drv.init());
+    auto readings = drv.read();
+    TEST_ASSERT_EQUAL(2, (int)readings.size());
+    for (auto& r : readings) {
+        if (r.parameter == "temperature") TEST_ASSERT_FLOAT_WITHIN(0.5, 25.0, r.value);
+        if (r.parameter == "humidity")    TEST_ASSERT_FLOAT_WITHIN(0.5, 50.0, r.value);
+    }
+}
+
 void test_factory_bh1750() {
     bus.addDevice(0x23);
     auto drv = createI2CDriver(bus, 0x23);
@@ -381,6 +409,8 @@ int main() {
     RUN_TEST(test_ads1115_read_channels);
     RUN_TEST(test_bh1750_read_lux);
     RUN_TEST(test_sht31_read_temp_hum);
+    RUN_TEST(test_factory_aht20);
+    RUN_TEST(test_aht20_read_temp_hum);
     RUN_TEST(test_ina219_read_voltage_current);
 
     return UNITY_END();

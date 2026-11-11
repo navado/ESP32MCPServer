@@ -150,6 +150,19 @@ private:
     static bool crc8(const uint8_t* data, size_t len, uint8_t expected);
 };
 
+// AHT20 - temperature, humidity (Aosong). Address 0x38
+class AHT20Driver : public I2CSensorDriver {
+public:
+    explicit AHT20Driver(I2CInterface& bus, uint8_t addr = 0x38);
+    const char* name() const override { return "AHT20"; }
+    bool probe() override;
+    bool init()  override;
+    std::vector<SensorReading> read() override;
+    std::vector<std::string>   parameters() const override {
+        return {"temperature","humidity"};
+    }
+};
+
 // ---------------------------------------------------------------------------
 // BH1750 — ambient light (lux)
 // Addresses: 0x23 (ADDR low) or 0x5C (ADDR high)
