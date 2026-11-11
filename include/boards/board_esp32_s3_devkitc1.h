@@ -11,6 +11,11 @@
 #define BOARD_HAS_BLE       1
 #define BOARD_HAS_CAN       1   // TWAI peripheral (ISO 11898-1 compatible)
 
+// ── Memory ───────────────────────────────────────────────────────────────────
+// Cap the bus-history auto-config heap budget so Bluetooth has room for its
+// controller + workqueue + scan allocations.  See BusHistory::platformFreeHeap().
+#define BOARD_BUS_HISTORY_HEAP_CAP  (160 * 1024)
+
 // ── I2C (Arduino Wire defaults for ESP32-S3) ─────────────────────────────────
 #define BOARD_I2C_SDA       8
 #define BOARD_I2C_SCL       9

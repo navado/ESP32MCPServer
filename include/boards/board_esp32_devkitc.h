@@ -8,8 +8,14 @@
 #define BOARD_NAME          "ESP32 DevKitC V4"
 #define BOARD_VARIANT       "esp32"
 #define BOARD_HAS_WIFI      1
-#define BOARD_HAS_BLE       1   // Bluetooth Classic 4.2 + BLE
+// 4 MB flash: BLE + OTA + full server exceeds the 1.25 MB OTA app slot.
+#define BOARD_HAS_BLE       0
 #define BOARD_HAS_CAN       1   // TWAI peripheral
+
+// ── Memory ───────────────────────────────────────────────────────────────────
+// Cap the bus-history auto-config heap budget so Bluetooth has room for its
+// controller + workqueue + scan allocations.  See BusHistory::platformFreeHeap().
+#define BOARD_BUS_HISTORY_HEAP_CAP  (128 * 1024)
 
 // ── I2C (Arduino Wire defaults for classic ESP32) ────────────────────────────
 #define BOARD_I2C_SDA       21

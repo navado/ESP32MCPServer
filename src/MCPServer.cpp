@@ -1,6 +1,7 @@
 #include "MCPServer.h"
 #include "MCPTypes.h"
 #include <ArduinoJson.h>
+#include <new>
 
 using namespace mcp;
 
@@ -8,18 +9,60 @@ using namespace mcp;
 // Construction / lifecycle
 // ---------------------------------------------------------------------------
 
-MCPServer::MCPServer(uint16_t port) : port_(port) {}
+MCPServer::MCPServer(uint16_t port)
+#ifndef NATIVE_TEST
+    : port_(port), wsServer_(port)
+#else
+    : port_(port)
+#endif
+{
+}
 
 void MCPServer::begin(bool /*isConnected*/) {
-    // In production this would initialise the AsyncWebSocket and register
-    // the WebSocket event handler that calls processMessage().  Kept as a
-    // stub here because the WebSocket library headers are ESP32-specific;
-    // the logic is exercised through processMessage() in unit tests.
+#ifndef NATIVE_TEST
+    wsServer_.onEvent([this](uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
+        this->onWebSocketEvent(num, type, payload, length);
+    });
+    wsServer_.begin();
+#endif
 }
 
 void MCPServer::handleClient() {
-    // In production: ws_.cleanupClients();
+#ifndef NATIVE_TEST
+    wsServer_.loop();
+#endif
 }
+
+#ifndef NATIVE_TEST
+void MCPServer::onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
+    switch (type) {
+        case WStype_CONNECTED:
+            onClientConnect(num);
+            break;
+        case WStype_DISCONNECTED:
+            break;
+        case WStype_TEXT: {
+            if (payload == nullptr || length == 0) break;
+            std::string json(reinterpret_cast<char*>(payload), length);
+            std::string response = processMessage(num, json);
+            if (!response.empty()) {
+                wsServer_.sendTXT(num, response.c_str(), response.length());
+            }
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+void MCPServer::onClientConnect(uint8_t num) {
+    if (!sendFunc_) {
+        sendFunc_ = [this](uint8_t cid, const std::string& msg) {
+            wsServer_.sendTXT(cid, msg.c_str(), msg.length());
+        };
+    }
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // Resource management
@@ -98,7 +141,19 @@ std::string MCPServer::dispatch(uint8_t clientId, const std::string& method,
     // Check extension method handlers registered by external components
     auto it = methodHandlers_.find(method);
     if (it != methodHandlers_.end()) {
-        return it->second(clientId, id, params);
+        try {
+            return it->second(clientId, id, params);
+        } catch (const std::bad_alloc&) {
+            // Heap exhaustion (e.g. a huge ble/scan/results payload).  NEVER
+            // let the exception escape: on the device it propagates out of
+            // the MCP task through the WebSockets library and std::terminate
+            // reboots the board, dropping every connected client.  Reply with
+            // a JSON-RPC error instead; the client sees a clean failure and
+            // the server keeps serving.
+            return makeError(id, -32603, "Internal error: out of memory");
+        } catch (...) {
+            return makeError(id, -32603, "Internal error");
+        }
     }
 
     return makeError(id, -32601, "Method not found");

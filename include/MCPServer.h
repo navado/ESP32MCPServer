@@ -8,6 +8,10 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#ifndef NATIVE_TEST
+#include <WebSocketsServer.h>
+#endif
+
 namespace mcp {
 
 struct Implementation {
@@ -71,6 +75,11 @@ private:
     Implementation serverInfo_{"esp32-mcp-server", "1.0.0"};
     ServerCapabilities capabilities_{true, true};
     SendFunc sendFunc_;
+#ifndef NATIVE_TEST
+    WebSocketsServer wsServer_;
+    void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length);
+    void onClientConnect(uint8_t num);
+#endif
 
     // Resource registry: URI -> MCPResource
     std::unordered_map<std::string, MCPResource> resources_;

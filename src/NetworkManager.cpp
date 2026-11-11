@@ -32,6 +32,13 @@ void NetworkManager::setOTAManager(OTAManager* ota) {
 #endif
 
 void NetworkManager::begin() {
+    // Initialize the lwIP/TCP stack (esp_netif_init) before anything else —
+    // and before starting the async web server.  AsyncTCP calls
+    // tcpip_api_call() in AsyncServer::begin(), which asserts with
+    // "Invalid mbox" if the TCP/IP stack has not been initialized yet.
+    // WiFi.mode() is what triggers the low-level init in the Arduino core.
+    WiFi.mode(WIFI_STA);
+
     // Initialize LittleFS if not already initialized
     if (!LittleFS.begin(false)) {
         Serial.println("LittleFS Mount Failed - Formatting...");

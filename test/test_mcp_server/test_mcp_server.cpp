@@ -1,5 +1,6 @@
 #include <unity.h>
 #include "MCPServer.h"
+#include <new>
 #include <string>
 #include <memory>
 #include "mock/mock_websocket.h"
@@ -121,6 +122,36 @@ void test_error_handling() {
     TEST_ASSERT_TRUE(response.find("Resource not found") != std::string::npos);
 }
 
+void test_handler_bad_alloc_returns_error_and_server_survives() {
+    // A handler that simulates heap exhaustion while building its response
+    // (the ble/scan/results failure mode on a flooded BLE radio).
+    server->registerMethodHandler("test/oom", [](uint8_t, uint32_t, const JsonObject&) -> std::string {
+        throw std::bad_alloc();
+    });
+
+    const char* oomRequest = R"({
+        "jsonrpc": "2.0",
+        "method": "test/oom",
+        "id": 7
+    })";
+    std::string response = mockWs->simulateMessage(1, oomRequest);
+
+    // The exception must be converted to a JSON-RPC internal-error reply —
+    // it must NEVER escape the dispatch call (on device it reboots the board).
+    TEST_ASSERT_TRUE(response.find("\"error\"") != std::string::npos);
+    TEST_ASSERT_TRUE(response.find("-32603") != std::string::npos);
+
+    // The server must still serve normal requests afterwards.
+    const char* pingRequest = R"({
+        "jsonrpc": "2.0",
+        "method": "resources/list",
+        "id": 8
+    })";
+    response = mockWs->simulateMessage(1, pingRequest);
+    TEST_ASSERT_TRUE(response.find("\"resources\"") != std::string::npos);
+    TEST_ASSERT_TRUE(response.find("\"error\"") == std::string::npos);
+}
+
 void test_concurrent_clients() {
     MCPResource testResource("test", "test://concurrent", "application/json", "Test concurrent access");
     server->registerResource(testResource);
@@ -153,6 +184,7 @@ int runUnityTests() {
     RUN_TEST(test_resource_read);
     RUN_TEST(test_resource_subscription);
     RUN_TEST(test_error_handling);
+    RUN_TEST(test_handler_bad_alloc_returns_error_and_server_survives);
     RUN_TEST(test_concurrent_clients);
     
     return UNITY_END();

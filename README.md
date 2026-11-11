@@ -21,6 +21,7 @@ Connect an AI agent directly to your hardware: query I2C sensors, parse NMEA 018
 | **OBD-II / CAN** | Standard 11-bit OBD-II service 01/09 PID decoding (60+ PIDs) |
 | **Bus History** | Persistent ring buffers for CAN, NMEA, NMEA 2000, OBD-II — queryable via MCP |
 | **Bus Readers** | Time-bounded serial and CAN reads, raw or parsed mode, JSON output |
+| **Bluetooth (BLE)** | Active advertising scanner (raw payload capture + history) and GATT enumeration — queryable via MCP |
 | **WiFi** | AP setup UI + STA mode; credentials stored in NVS |
 | **Discovery** | mDNS (`_mcp._tcp`) + UDP capability broadcast |
 | **Metrics** | Heap, uptime, RSSI, histogram stats with boot persistence |
@@ -36,10 +37,12 @@ Connect an AI agent directly to your hardware: query I2C sensors, parse NMEA 018
 | Board | PlatformIO env | MCU | Flash | RAM | WiFi | BLE | CAN | RGB LED |
 |---|---|---|---|---|---|---|---|---|
 | **ESP32-S3-DevKitC-1** | `esp32-s3-devkitc-1` | Xtensa LX7 × 2 @ 240 MHz | 8 MB | 512 KB + 8 MB PSRAM | ✓ | 5.0 | ✓ | GPIO48 |
-| **ESP32-DevKitC V4** | `esp32-devkitc` | Xtensa LX6 × 2 @ 240 MHz | 4 MB | 520 KB | ✓ | 4.2 | ✓ | — |
-| **ESP32-C3-DevKitM-1** | `esp32-c3-devkitm-1` | RISC-V @ 160 MHz | 4 MB | 400 KB | ✓ | 5.0 | ✓ | GPIO8 |
-| **Adafruit HUZZAH32** | `adafruit-huzzah32` | Xtensa LX6 × 2 @ 240 MHz | 4 MB | 520 KB | ✓ | 4.2 | ✓ | — |
-| **M5Stack Core ESP32** | `m5stack-core` | Xtensa LX6 × 2 @ 240 MHz | 16 MB | 520 KB | ✓ | 4.2 | ✗ | — |
+| **ESP32-DevKitC V4** | `esp32-devkitc` | Xtensa LX6 × 2 @ 240 MHz | 4 MB | 520 KB | ✓ | ✗¹ | ✓ | — |
+| **ESP32-C3-DevKitM-1** | `esp32-c3-devkitm-1` | RISC-V @ 160 MHz | 4 MB | 400 KB | ✓ | ✗¹ | ✓ | GPIO8 |
+| **Adafruit HUZZAH32** | `adafruit-huzzah32` | Xtensa LX6 × 2 @ 240 MHz | 4 MB | 520 KB | ✓ | ✗¹ | ✓ | — |
+| **M5Stack Core ESP32** | `m5stack-core` | Xtensa LX6 × 2 @ 240 MHz | 16 MB | 520 KB | ✓ | ✗¹ | ✗ | — |
+
+¹ 4 MB-flash boards: the BLE stack + the MCP WebSocket server + OTA cannot all fit the 1.25 MB OTA app slot, so BLE is compiled out (the hardware still supports it). BLE is available on the ESP32-S3 (8 MB flash).
 
 ### nRF52840 Boards — Sensor Only (I2C + Serial, no WiFi)
 
@@ -55,7 +58,7 @@ Connect an AI agent directly to your hardware: query I2C sensors, parse NMEA 018
 | Feature | ESP32-S3 | ESP32 V4 | ESP32-C3 | HUZZAH32 | M5Stack | nRF52840-DK | nRF52840-Feather |
 |---|---|---|---|---|---|---|---|
 | WiFi | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ |
-| BLE | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| BLE | ✓ | ✗¹ | ✗¹ | ✗¹ | ✗¹ | ✓ | ✓ |
 | CAN / TWAI | ✓ | ✓ | ✓ | ✓ | ✗ | ✗ | ✗ |
 | I2C | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | UART (ext) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
@@ -527,6 +530,100 @@ After subscribing the server pushes unsolicited `notifications/resources/updated
 ```json
 {"jsonrpc":"2.0","method":"notifications/resources/updated","params":{"uri":"sensor://i2c/bme280_0x76"}}
 ```
+
+### Bluetooth (BLE)
+
+Active BLE advertising capture for reverse-engineering broadcast formats, plus optional GATT enumeration.  Scans are **non-blocking**: start a scan, wait, then fetch results.
+
+> BLE is currently built for the ESP32-S3 target only (8 MB flash).  On the 4 MB-flash boards the BLE stack cannot fit alongside the WebSocket server and OTA, so the `ble/*` methods are not compiled there.
+
+| Method | Params | Description |
+|---|---|---|
+| `ble/scan` | `durationMs?` | Start a scan (default 5000 ms; 0 = continuous until `ble/scan/stop`); returns immediately. If a scan is already running: `{started:false, scanning:true, remainingMs}` |
+| `ble/scan/results` | `mac?`, `serviceUuid?`, `manufacturerId?`, `macPrefix?` | Stop the scan (if running) and return captured devices; optional case-insensitive `mac` returns only that device with its **full** payload history; optional AND-combined response filters (`serviceUuid`, `manufacturerId` hex, `macPrefix`) never affect capture |
+| `ble/scan/payloads` | — | Stop the scan and return the **MAC-independent payload registry**: distinct payloads across ALL broadcasters, first-seen order, with `count` + `firstSeen`/`lastSeen` (ms since scan start). The primary artifact for protocol reverse-engineering — survives per-MAC MAC-rotation churn |
+| `ble/scan/poll` | — | Live read of the payload registry WITHOUT stopping the scan (stateless; diff by `firstSeen`) |
+| `ble/scan/stop` | — | Stop a continuous scan early |
+| `ble/connect` | `mac`, `timeoutMs?` | Begin an **asynchronous** GATT connect to a peer MAC (default timeout 5000 ms) |
+| `ble/connect/results` | — | Poll the outcome of the last async connect |
+| `ble/disconnect` | — | Drop the GATT link |
+| `ble/services/start` | — | Enumerate services/characteristics (background task); returns immediately |
+| `ble/services/results` | `notifyCaptureMs?` | Wait for enumeration + notified values (default 3000 ms) |
+| `ble/services/stop` | — | Unsubscribe from notifications and close the link |
+
+#### `ble/scan` / `ble/scan/results`
+
+```json
+{"jsonrpc":"2.0","method":"ble/scan","id":14,"params":{"durationMs":10000}}
+```
+```json
+{"jsonrpc":"2.0","id":14,"result":{"started":true,"scanning":true}}
+```
+
+```json
+{"jsonrpc":"2.0","method":"ble/scan/results","id":15}
+```
+```json
+{
+  "jsonrpc":"2.0","id":15,
+  "result":{"devices":[
+    {
+      "mac":"62:38:e6:6b:1c:f9","name":"","rssi":-56,"connectable":true,
+      "count":2,
+      "payloadHistory":[
+        "0201010effff006db643ce97fe427cd5964c03038fae",
+        "0201010effff006db643ce97fe427cc1ba0b03038fae"
+      ],
+      "services":"0000ae8f-0000-1000-8000-00805f9b34fb",
+      "manufacturer":"ff006db643ce97fe427cd5964c"
+    }
+  ]}
+}
+```
+
+Notes for reverse engineering:
+- `payloadHistory` holds the **distinct raw payloads** (oldest → newest) seen per device, bounded to 64 retained entries (device count bounded to 12, payloads capped at 64 bytes each).  A change between entries is a state change in the broadcaster (e.g. a button press or level change).  When the bound is reached the oldest entry is dropped; `count` is the number of distinct payloads currently retained.
+- The unfiltered `ble/scan/results` response serialises only the **newest 4** payloads per device (`count` still reports the true distinct total, so `payloadHistory` length may be less than `count`).  Pass the optional `mac` param (case-insensitive) to fetch a single device's **full** history — e.g. `ble/scan/results` with `{"mac":"62:38:e6:6b:1c:f9"}`.  This keeps the quick-look response small even when the BLE radio is flooded while preserving deep per-device capture for protocol reverse-engineering.
+- `manufacturer` contains the manufacturer-specific data as hex — company ID is the first two bytes (little-endian).  The example payload above uses manufacturer ID `0xFF00` and the 8-byte prefix `6D B6 43 CE 97 FE 42 7C` (a broadcast-controlled toy protocol), with `D5 96 4C` → `C1 BA 0B` showing a state change.
+- `isConnectable` is a heuristic from the BLE flags AD type; absent/malformed flags default to connectable.
+
+#### `ble/connect` / `ble/connect/results` / `ble/services/*`
+
+```json
+{"jsonrpc":"2.0","method":"ble/connect","id":16,"params":{"mac":"00:1b:66:c6:da:c8","timeoutMs":5000}}
+```
+```json
+{"jsonrpc":"2.0","id":16,"result":{"started":true,"connecting":true,"connected":false}}
+```
+
+`ble/connect` returns immediately; the open handshake completes in the background within `timeoutMs` (the parameter is enforced).  Poll for the outcome:
+
+```json
+{"jsonrpc":"2.0","method":"ble/connect/results","id":17}
+```
+```json
+{"jsonrpc":"2.0","id":17,"result":{"connecting":false,"connected":true}}
+```
+
+```json
+{"jsonrpc":"2.0","method":"ble/services/start","id":18}
+```
+```json
+{"jsonrpc":"2.0","method":"ble/services/results","id":19}
+```
+```json
+{
+  "jsonrpc":"2.0","id":19,
+  "result":{"connected":true,"services":[
+    {"uuid":"00001800-0000-1000-8000-00805f9b34fb","characteristics":[
+      {"uuid":"00002a00-0000-1000-8000-00805f9b34fb","properties":"read",
+       "valueHex":"4c452d4844203335304254","valueText":"LE-HD 350BT"}
+    ]}
+  ]}
+}
+```
+
+GATT enumeration runs in the background so a slow or uncooperative peer cannot block the MCP server.  Every operation is time-bounded: the open handshake (`timeoutMs`), service discovery (10 s cap), characteristic reads (5 s per read), and the notified-value capture window (`notifyCaptureMs`, default 3000 ms).  `ble/services/stop` (or `ble/disconnect`) closes the link, tearing down any in-flight work safely.
 
 ### TypeScript client example
 

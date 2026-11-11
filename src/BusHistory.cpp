@@ -12,8 +12,23 @@ static uint32_t platformFreeHeap() {
 }
 #else
 #  include <Arduino.h>
+#  include "board_config.h"
+#  ifndef BOARD_BUS_HISTORY_HEAP_CAP
+#    define BOARD_BUS_HISTORY_HEAP_CAP 0  // 0 = use full free heap (legacy behaviour)
+#  endif
 static uint32_t platformFreeHeap() {
-    return static_cast<uint32_t>(ESP.getFreeHeap());
+    // Cap the auto-config budget so Bluetooth has heap headroom.  Without a
+    // cap, BusHistory grabs freeHeap - 64KB which starves BLE (controller +
+    // workqueue + scan allocations) and causes bad_alloc inside the scan
+    // callback / BTU_StartUp failures (observed on ESP32-S3, 320KB internal
+    // RAM).  Per-board value via BOARD_BUS_HISTORY_HEAP_CAP; 0 = uncapped.
+    uint32_t freeHeap = static_cast<uint32_t>(ESP.getFreeHeap());
+#if BOARD_BUS_HISTORY_HEAP_CAP > 0
+    return freeHeap < BOARD_BUS_HISTORY_HEAP_CAP ? freeHeap
+                                                 : BOARD_BUS_HISTORY_HEAP_CAP;
+#else
+    return freeHeap;
+#endif
 }
 #endif
 

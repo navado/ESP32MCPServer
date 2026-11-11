@@ -1,6 +1,7 @@
 #pragma once
 
 #include "MCPServer.h"
+#include <algorithm>
 #include <functional>
 #include <queue>
 #include <string>
