@@ -5,6 +5,7 @@
 // test_ble_scanner suite.
 
 #include <cstdint>
+#include <cctype>
 #include <cstdlib>
 #include <map>
 #include <string>
@@ -23,10 +24,15 @@ struct BLEAdvReport {
     std::vector<std::string> payloadHistory;
     std::string servicesHex;   // advertised 128/32/16-bit service UUIDs, comma-separated
     std::string manufacturer;  // manufacturer data, hex (company id first 2 bytes)
-    bool        isConnectable;
-    uint64_t    firstSeen;     // millis() of first report
+    bool        isConnectable = false;
+    uint64_t    firstSeen = 0; // millis() of first report
+    uint64_t    lastSeen = 0;  // millis() of latest report (eviction is LRU on this)
     // Number of DISTINCT payloads captured for this MAC.
-    uint32_t    count;
+    uint32_t    count = 0;
+    // Advertiser address type, numerically identical to esp_ble_addr_type_t:
+    // 0 public, 1 random, 2 RPA-public, 3 RPA-random.  Needed to connect:
+    // opening a random-address peer with the public type never succeeds.
+    uint8_t     addrType = 0;
 };
 
 // One entry of the MAC-independent payload registry: a distinct payload as
@@ -63,16 +69,18 @@ namespace blecore {
 // protocol reverse-engineering possible in a single scan: 64 distinct
 // payloads covers a full command set (e.g. 10 levels x 2 channels + heater +
 // patterns) with margin.  The per-device storage cost is bounded by
-// MAX_PAYLOAD_HEX, so 64 x 128 chars x 12 devices is the pathological worst
-// case (~98 KB) and real captures (payloads are <= 62 bytes on air, ambient
-// devices rarely broadcast more than a couple of distinct payloads) land at
-// a few KB.
+// MAX_PAYLOAD_HEX per entry, and the WHOLE capture is bounded by
+// MAX_CAPTURE_BYTES (see captureBytes()): when a new device or payload would
+// exceed it, the least-recently-heard device is evicted.  That total budget,
+// not the per-device caps, is what keeps a flooded radio from exhausting the
+// heap, so MAX_DEVICES can be generous.
 //
 // The ble/scan/results endpoint serialises ONLY the newest MAX_PAYLOADS_VIEW
 // payloads per device (count reports the true distinct total), keeping the
 // unfiltered response the proven-safe size even under a flooded radio; the
 // full history is available per-MAC via ble/scan/results?mac=.
-constexpr size_t MAX_DEVICES       = 12;   // tracked MACs per scan
+constexpr size_t MAX_DEVICES       = 32;   // default tracked MACs per scan
+constexpr size_t MAX_DEVICES_LIMIT = 64;   // upper bound for runtime limits (MemoryPlan)
 constexpr size_t MAX_PAYLOADS      = 64;   // distinct payloads per MAC (deep)
 constexpr size_t MAX_PAYLOADS_VIEW = 4;    // payloads serialised by the unfiltered endpoint
 // Cap on the length of a single stored payload.  Payloads longer than this are
@@ -87,6 +95,15 @@ constexpr size_t MAX_PAYLOAD_HEX   = MAX_PAYLOAD_BYTES * 2;
 // churn (e.g. the phone rotating its MAC every ~1s).  64 covers the whole
 // LoveSpouse command vocabulary (~30 commands) with margin.
 constexpr size_t MAX_REGISTRY_PAYLOADS = 64;
+
+// Total heap budget for captured device reports (estimated by captureBytes()).
+// Sized so the largest unfiltered ble/scan/results response (MAX_DEVICES x
+// MAX_PAYLOADS_VIEW payloads) plus its JsonDocument fits comfortably on an
+// ESP32-S3 alongside the BLE stack and WebSocket transport.
+constexpr size_t MAX_CAPTURE_BYTES = 32 * 1024;
+// Approximate per-std::string cost on the ESP32 heap (object + allocation
+// header + rounding) used by the capture-size estimate.
+constexpr size_t STRING_OVERHEAD = 32;
 
 // Encode raw bytes as lowercase hex ("" for empty input).
 inline std::string hexEncode(const uint8_t* data, size_t len) {
@@ -174,6 +191,141 @@ inline void recordPayload(std::vector<std::string>& history, uint32_t& count,
     count = static_cast<uint32_t>(history.size());
 }
 
+// ---- Address types --------------------------------------------------------
+
+constexpr uint8_t ADDR_TYPE_PUBLIC     = 0;
+constexpr uint8_t ADDR_TYPE_RANDOM     = 1;
+constexpr uint8_t ADDR_TYPE_RPA_PUBLIC = 2;
+constexpr uint8_t ADDR_TYPE_RPA_RANDOM = 3;
+
+inline const char* addrTypeName(uint8_t t) {
+    switch (t) {
+        case ADDR_TYPE_PUBLIC:     return "public";
+        case ADDR_TYPE_RANDOM:     return "random";
+        case ADDR_TYPE_RPA_PUBLIC: return "rpa-public";
+        case ADDR_TYPE_RPA_RANDOM: return "rpa-random";
+        default:                   return "unknown";
+    }
+}
+
+// Parse a client-supplied address type ("public", "random", "rpa-public",
+// "rpa-random"; case-insensitive).  Returns false for anything else.
+inline bool parseAddrType(const std::string& s, uint8_t& out) {
+    std::string l = s;
+    for (char& c : l) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    for (uint8_t t = ADDR_TYPE_PUBLIC; t <= ADDR_TYPE_RPA_RANDOM; ++t) {
+        if (l == addrTypeName(t)) { out = t; return true; }
+    }
+    return false;
+}
+
+// Case-insensitive MAC comparison ("AA:BB:.." == "aa:bb:..").
+inline bool macEquals(const std::string& a, const std::string& b) {
+    if (a.length() != b.length()) return false;
+    for (size_t i = 0; i < a.length(); ++i) {
+        if (tolower(static_cast<unsigned char>(a[i])) !=
+            tolower(static_cast<unsigned char>(b[i]))) return false;
+    }
+    return true;
+}
+
+// Look up the address type a scan recorded for `mac`.  Returns false when the
+// MAC was not seen (callers then fall back to public).
+inline bool lookupAddrType(const std::vector<BLEAdvReport>& reports,
+                           const std::string& mac, uint8_t& out) {
+    for (const auto& r : reports) {
+        if (macEquals(r.mac, mac)) { out = r.addrType; return true; }
+    }
+    return false;
+}
+
+// Merge a later report (typically the scan response) into a known device:
+// fields that were empty in the first advertisement are filled in.  Names,
+// service lists and manufacturer data very often arrive ONLY in the scan
+// response, so without this they are never captured.
+inline void mergeReportFields(BLEAdvReport& known, const std::string& name,
+                              const std::string& servicesHex,
+                              const std::string& manufacturer) {
+    if (known.name.empty() && !name.empty()) known.name = name;
+    if (known.servicesHex.empty() && !servicesHex.empty()) known.servicesHex = servicesHex;
+    if (known.manufacturer.empty() && !manufacturer.empty()) known.manufacturer = manufacturer;
+}
+
+// ---- Capture budget and eviction -------------------------------------------
+
+// Estimated heap footprint of one report.
+inline size_t reportBytes(const BLEAdvReport& r) {
+    size_t n = sizeof(BLEAdvReport);
+    n += r.mac.capacity() + r.name.capacity() + r.servicesHex.capacity() +
+         r.manufacturer.capacity() + 4 * STRING_OVERHEAD;
+    for (const auto& p : r.payloadHistory) n += p.capacity() + STRING_OVERHEAD;
+    // The scanner's per-MAC dedupe set mirrors the history (map node + key).
+    n += r.payloadHistory.size() * (48 + STRING_OVERHEAD) + r.mac.capacity();
+    return n;
+}
+
+inline size_t captureBytes(const std::vector<BLEAdvReport>& reports) {
+    size_t n = 0;
+    for (const auto& r : reports) n += reportBytes(r);
+    return n;
+}
+
+// Index of the device to evict: the one heard least recently.  (The previous
+// policy evicted the device FIRST seen, which kept dropping devices that were
+// still actively advertising while rotating MACs churned through the list.)
+// Ties go to the earliest entry.  Returns reports.size() when empty.
+// `exclude` (a MAC) is never chosen — used to protect the device that was just
+// added or updated while enforcing the budget.
+inline size_t lruIndex(const std::vector<BLEAdvReport>& reports,
+                       const std::string& exclude = std::string()) {
+    size_t idx = reports.size();
+    for (size_t i = 0; i < reports.size(); ++i) {
+        if (!exclude.empty() && reports[i].mac == exclude) continue;
+        if (idx == reports.size() || reports[i].lastSeen < reports[idx].lastSeen) idx = i;
+    }
+    return idx;
+}
+
+// ---- Capture filter (applied when a report is RECORDED) ---------------------
+
+// Unlike the ble/scan/results response filters, these decide what is stored at
+// all, so a busy RF environment cannot crowd the device of interest out of the
+// capture.  Empty / default fields match everything.
+struct CaptureFilter {
+    int         minRssi = -128;     // dBm; reports weaker than this are ignored
+    std::string manufacturerPrefix; // lowercase hex prefix of manufacturer data
+                                    // (company id little-endian, e.g. 0xDEAD -> "adde")
+    std::string serviceUuid;        // substring of the advertised service list
+    std::string macPrefix;          // lowercase MAC prefix, e.g. "d7:2f"
+
+    bool active() const {
+        return minRssi > -128 || !manufacturerPrefix.empty() ||
+               !serviceUuid.empty() || !macPrefix.empty();
+    }
+};
+
+inline std::string toLowerCopy(const std::string& s) {
+    std::string l = s;
+    for (char& c : l) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
+    return l;
+}
+
+// True when a report for a NOT-yet-captured device should be recorded.  Known
+// devices are always updated (their scan responses must still merge in).
+inline bool captureMatches(const CaptureFilter& f, const std::string& mac, int rssi,
+                           const std::string& servicesHex,
+                           const std::string& manufacturer) {
+    if (rssi < f.minRssi) return false;
+    if (!f.macPrefix.empty() &&
+        toLowerCopy(mac).compare(0, f.macPrefix.length(), f.macPrefix) != 0) return false;
+    if (!f.manufacturerPrefix.empty() &&
+        toLowerCopy(manufacturer).compare(0, f.manufacturerPrefix.length(),
+                                          f.manufacturerPrefix) != 0) return false;
+    if (!f.serviceUuid.empty() &&
+        toLowerCopy(servicesHex).find(f.serviceUuid) == std::string::npos) return false;
+    return true;
+}
+
 // Record a payload into the MAC-independent registry.  The registry is
 // insertion-ordered (first-seen order), deduped on the truncated hex form,
 // and bounded to MAX_REGISTRY_PAYLOADS entries (when full, new distinct
@@ -181,7 +333,8 @@ inline void recordPayload(std::vector<std::string>& history, uint32_t& count,
 // device eviction, so it survives a flood of rotating MACs.  `now` is the
 // millis() at observation time; the caller is responsible for locking.
 inline void recordRegistryPayload(std::vector<BLEPayloadEntry>& registry,
-                                  const std::string& payloadHex, uint64_t now) {
+                                  const std::string& payloadHex, uint64_t now,
+                                  uint32_t* dropped = nullptr) {
     if (payloadHex.empty()) return;
     std::string stored = payloadHex;
     if (stored.length() > MAX_PAYLOAD_HEX) {
@@ -194,7 +347,12 @@ inline void recordRegistryPayload(std::vector<BLEPayloadEntry>& registry,
             return;
         }
     }
-    if (registry.size() >= MAX_REGISTRY_PAYLOADS) return;  // registry full
+    if (registry.size() >= MAX_REGISTRY_PAYLOADS) {  // registry full
+        // Count what was lost so clients can tell the capture is incomplete
+        // instead of the overflow being silent.
+        if (dropped != nullptr) ++*dropped;
+        return;
+    }
     BLEPayloadEntry e;
     e.payload = stored;
     e.count = 1;

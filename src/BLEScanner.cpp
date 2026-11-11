@@ -9,10 +9,10 @@
 #include <esp_gap_bt_api.h>
 #include <esp_gatt_defs.h>
 #include <esp_gattc_api.h>
+#include <new>
 
 namespace mcp {
 
-using blecore::MAX_DEVICES;
 using blecore::hexEncode;
 using blecore::hexToAscii;
 using blecore::payloadIsConnectable;
@@ -108,12 +108,15 @@ void BLEScanner::begin() {
     BLEDevice::setCustomGattcHandler(gattcTrampoline);
 }
 
-bool BLEScanner::startScan(uint32_t durationMs) {
+bool BLEScanner::startScan(uint32_t durationMs, const blecore::CaptureFilter& filter) {
     lock();
     if (scanning_) { unlock(); return false; }
     reports_.clear();
     seenPayloads_.clear();
     payloadRegistry_.clear();
+    registryDropped_ = 0;
+    devicesEvicted_ = 0;
+    filter_ = filter;
     scanDurationMs_ = durationMs;
     scanStartedAt_ = millis();
     scanning_ = true;
@@ -124,7 +127,10 @@ bool BLEScanner::startScan(uint32_t durationMs) {
     // per-device payload history can capture payload changes.  The library
     // frees each BLEAdvertisedDevice after onResult() returns, so the heap
     // stays bounded even on a busy radio environment.
-    scan->setAdvertisedDeviceCallbacks(new ScannerCallback(this), true);
+    // The library stores the raw pointer and never frees it; allocate the
+    // callback once instead of leaking a new one on every scan.
+    static ScannerCallback* callback = new ScannerCallback(this);
+    scan->setAdvertisedDeviceCallbacks(callback, true);
     // Active scan requests scan responses (more data, e.g. names).
     scan->setActiveScan(true);
     scan->setInterval(100);
@@ -167,6 +173,57 @@ std::vector<BLEPayloadEntry> BLEScanner::getPayloadRegistry() {
     return out;
 }
 
+blecore::CaptureFilter BLEScanner::getCaptureFilter() const {
+    lock();
+    blecore::CaptureFilter f = filter_;
+    unlock();
+    return f;
+}
+
+uint32_t BLEScanner::getDevicesEvicted() const {
+    lock();
+    uint32_t n = devicesEvicted_;
+    unlock();
+    return n;
+}
+
+void BLEScanner::evictAt(size_t idx) {
+    if (idx >= reports_.size()) return;
+    seenPayloads_.erase(reports_[idx].mac);
+    reports_.erase(reports_.begin() + static_cast<long>(idx));
+    ++devicesEvicted_;
+}
+
+void BLEScanner::setCaptureLimits(size_t maxDevices, size_t maxBytes) {
+    if (maxDevices < 1) maxDevices = 1;
+    if (maxDevices > blecore::MAX_DEVICES_LIMIT) maxDevices = blecore::MAX_DEVICES_LIMIT;
+    lock();
+    maxDevices_ = maxDevices;
+    maxCaptureBytes_ = maxBytes;
+    unlock();
+}
+
+size_t BLEScanner::getMaxDevices() const {
+    lock();
+    size_t n = maxDevices_;
+    unlock();
+    return n;
+}
+
+void BLEScanner::enforceCaptureBudget(const std::string& keepMac) {
+    while (reports_.size() > 1 &&
+           blecore::captureBytes(reports_) > maxCaptureBytes_) {
+        evictAt(blecore::lruIndex(reports_, keepMac));
+    }
+}
+
+uint32_t BLEScanner::getRegistryDropped() const {
+    lock();
+    uint32_t d = registryDropped_;
+    unlock();
+    return d;
+}
+
 uint64_t BLEScanner::getScanStartedAt() const {
     lock();
     uint64_t t = scanStartedAt_;
@@ -207,56 +264,81 @@ void BLEScanner::onAdv(BLEAdvertisedDevice* adv) {
         payloadHex = hexEncode(raw, rawLen);
     }
 
+    // Fields that may arrive only in the scan response (a separate report for
+    // the same MAC): collect them for both the new-device and merge paths.
+    std::string name;
+    if (adv->haveName()) name = adv->getName().c_str();
+    std::string servicesHex;
+    for (int i = 0; i < adv->getServiceUUIDCount(); ++i) {
+        if (!servicesHex.empty()) servicesHex += ",";
+        servicesHex += adv->getServiceUUID(i).toString();
+    }
+    std::string manufacturer;
+    if (adv->haveManufacturerData()) {
+        std::string md = adv->getManufacturerData();
+        manufacturer = hexEncode(reinterpret_cast<const uint8_t*>(md.data()),
+                                 md.length());
+    }
+
+    const uint64_t now = millis();
+    const int rssi = adv->getRSSI();
+
     // Merge duplicate reports for the same MAC.
     for (auto& r : reports_) {
         if (r.mac == mac) {
-            r.rssi = adv->getRSSI();
+            r.rssi = rssi;
+            r.lastSeen = now;
+            blecore::mergeReportFields(r, name, servicesHex, manufacturer);
+            const size_t before = r.payloadHistory.size();
             recordPayload(r.payloadHistory, r.count, seenPayloads_[r.mac], payloadHex);
             // MAC-independent registry: also record across all broadcasters.
             if (!payloadHex.empty()) {
-                blecore::recordRegistryPayload(payloadRegistry_, payloadHex, millis());
+                blecore::recordRegistryPayload(payloadRegistry_, payloadHex, now,
+                                              &registryDropped_);
+            }
+            // `r` may be invalidated by eviction below, so copy the key first.
+            if (r.payloadHistory.size() != before) {
+                std::string keep = r.mac;
+                enforceCaptureBudget(keep);
             }
             unlock();
             return;
         }
     }
 
-    // New device — enforce the device cap (FIFO eviction).
-    while (reports_.size() >= MAX_DEVICES) {
-        seenPayloads_.erase(reports_.front().mac);
-        reports_.erase(reports_.begin());
+    // New device: apply the capture filter, so ambient traffic cannot crowd
+    // the device of interest out of the capture.
+    if (!blecore::captureMatches(filter_, mac, rssi, servicesHex, manufacturer)) {
+        unlock();
+        return;
+    }
+
+    // Enforce the device cap: evict the least-recently-heard device.
+    while (reports_.size() >= maxDevices_) {
+        evictAt(blecore::lruIndex(reports_));
     }
 
     BLEAdvReport rep;
     rep.mac = mac;
-    rep.rssi = adv->getRSSI();
+    rep.rssi = rssi;
     rep.isConnectable = payloadIsConnectable(raw, rawLen);
-    rep.firstSeen = millis();
+    rep.firstSeen = now;
+    rep.lastSeen = now;
     rep.count = 0;
-
-    if (adv->haveName()) rep.name = adv->getName().c_str();
-
-    // Advertised service UUIDs (128-bit / 32-bit / 16-bit, as reported).
-    for (int i = 0; i < adv->getServiceUUIDCount(); ++i) {
-        std::string s = adv->getServiceUUID(i).toString();
-        if (!rep.servicesHex.empty()) rep.servicesHex += ",";
-        rep.servicesHex += s;
-    }
-
-    // Manufacturer specific data (company id + data).
-    if (adv->haveManufacturerData()) {
-        std::string md = adv->getManufacturerData();
-        rep.manufacturer = hexEncode(reinterpret_cast<const uint8_t*>(md.data()),
-                                     md.length());
-    }
+    rep.addrType = static_cast<uint8_t>(adv->getAddressType());
+    rep.name = name;
+    rep.servicesHex = servicesHex;
+    rep.manufacturer = manufacturer;
 
     reports_.push_back(rep);
     recordPayload(reports_.back().payloadHistory, reports_.back().count,
                   seenPayloads_[rep.mac], payloadHex);
     // MAC-independent registry: record the payload across all broadcasters.
     if (!payloadHex.empty()) {
-        blecore::recordRegistryPayload(payloadRegistry_, payloadHex, millis());
+        blecore::recordRegistryPayload(payloadRegistry_, payloadHex, now,
+                                              &registryDropped_);
     }
+    enforceCaptureBudget(mac);
     unlock();
 }
 
@@ -284,7 +366,7 @@ void BLEScanner::onAdv(BLEAdvertisedDevice* adv) {
 // may be open, so a late OPEN_EVT cannot leak the link.
 // ---------------------------------------------------------------------------
 
-bool BLEScanner::connect(const std::string& mac, uint32_t timeoutMs) {
+bool BLEScanner::connect(const std::string& mac, uint32_t timeoutMs, int addrType) {
     if (timeoutMs == 0) timeoutMs = 1;
     esp_bd_addr_t addr;
     int n = sscanf(mac.c_str(), "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
@@ -295,11 +377,19 @@ bool BLEScanner::connect(const std::string& mac, uint32_t timeoutMs) {
     if (connected_ || gattState_ != GattState::Idle) { unlock(); return false; }
     connectedMac_ = mac;
     memcpy(peerAddr_, addr, 6);
+    if (addrType >= 0) {
+        peerAddrType_ = static_cast<uint8_t>(addrType);
+    } else if (!blecore::lookupAddrType(reports_, mac, peerAddrType_)) {
+        peerAddrType_ = blecore::ADDR_TYPE_PUBLIC;  // not seen in a scan
+    }
     hasPeer_ = true;
     connectTimeoutMs_ = timeoutMs;
     openIssued_ = false;
-    registerIssued_ = false;
-    appRegistered_ = false;
+    // The GATT app registration survives across connections, and registering
+    // the same app id again fails with ESP_GATT_ERROR (REG_EVT not OK), which
+    // would leave appRegistered_ false and stall the open until timeout.  Only
+    // re-issue the registration if no successful REG_EVT has been seen yet.
+    if (!appRegistered_) registerIssued_ = false;
     closeIssued_ = false;
     gattState_ = GattState::Connecting;
     stateStartMillis_ = millis();
@@ -307,6 +397,13 @@ bool BLEScanner::connect(const std::string& mac, uint32_t timeoutMs) {
 
     ensureGattTask();
     return true;
+}
+
+uint8_t BLEScanner::getPeerAddrType() const {
+    lock();
+    uint8_t t = peerAddrType_;
+    unlock();
+    return t;
 }
 
 bool BLEScanner::isConnecting() const {
@@ -364,16 +461,20 @@ std::vector<BLEServiceInfo> BLEScanner::getServicesResults(uint32_t notifyCaptur
     // Wait for the enumeration to finish (bounded: 10 s discovery cap, then
     // `notifyCaptureMs` for notified values).  Blocking here is fine — this is
     // the caller's explicit results request.
+    notifyCaptureMs = gattcore::clampNotifyCaptureMs(notifyCaptureMs);
     lock();
     uint32_t waited = 0;
     const uint32_t enumLimit = notifyCaptureMs + DISCOVERY_TIMEOUT_MS;
-    bool busy = gattStateConnected(gattState_);
+    // Wait only while the enumeration is actually running.  (gattStateConnected
+    // is also true in Connected, i.e. AFTER enumeration finished, which made
+    // every call wait the full enumLimit while blocking the MCP task.)
+    bool busy = gattcore::gattEnumInProgress(gattState_, loadPending_);
     unlock();
     while (busy && waited < enumLimit) {
         delay(50);
         waited += 50;
         lock();
-        busy = gattStateConnected(gattState_);
+        busy = gattcore::gattEnumInProgress(gattState_, loadPending_);
         unlock();
     }
 
@@ -452,6 +553,7 @@ void BLEScanner::gattTaskBody() {
         uint16_t cid = 0;
         esp_bd_addr_t peer;
         memcpy(peer, peerAddr_, 6);
+        esp_ble_addr_type_t peerType = static_cast<esp_ble_addr_type_t>(peerAddrType_);
         switch (st) {
             case GattState::Connecting: {
                 if (!appRegistered_ && !registerIssued_) {
@@ -493,7 +595,7 @@ void BLEScanner::gattTaskBody() {
         if (doRegister) {
             esp_ble_gattc_app_register(GATTC_APP_ID);
         } else if (doOpen) {
-            esp_ble_gattc_open(gif, peer, BLE_ADDR_TYPE_PUBLIC, true);
+            esp_ble_gattc_open(gif, peer, peerType, true);
         } else if (doSearch) {
             esp_ble_gattc_search_service(gif, cid, nullptr);
         } else if (doClose) {
@@ -541,15 +643,20 @@ void BLEScanner::gattTaskBody() {
                 break;
         }
         bool idle = (st == GattState::Idle);
+        if (idle) {
+            // Clear the handle in the SAME critical section that observed
+            // Idle.  Releasing the lock first would let connect()/disconnect()
+            // move the state out of Idle, see a non-null handle, skip
+            // ensureGattTask(), and leave the state machine with no task to
+            // drive it (permanently wedged until reboot).
+            gattTaskHandle_ = nullptr;
+        }
         unlock();
 
         if (idle) break;  // all work done — exit the task
         delay(20);
     }
 
-    lock();
-    gattTaskHandle_ = nullptr;
-    unlock();
     vTaskDelete(nullptr);
 }
 
@@ -620,7 +727,7 @@ void BLEScanner::onGattcEvent(esp_gattc_cb_event_t event, esp_gatt_if_t gattcIf,
             pendingReads_.erase(it);
             if (param->read.status == ESP_GATT_OK && param->read.value_len > 0) {
                 std::string val(reinterpret_cast<const char*>(param->read.value),
-                                param->read.value_len);
+                                gattcore::clampGattValueLen(param->read.value_len));
                 std::string hex = hexEncode(reinterpret_cast<const uint8_t*>(val.data()),
                                             val.length());
                 for (auto& svc : services_) {
@@ -650,8 +757,15 @@ void BLEScanner::onGattcEvent(esp_gattc_cb_event_t event, esp_gatt_if_t gattcIf,
         case ESP_GATTC_NOTIFY_EVT: {
             lock();
             if (gattcIf != gattcIf_ || param->notify.conn_id != connId_) { unlock(); break; }
+            // Only keep values for characteristics we subscribed to, bounded in
+            // size: a peer must not be able to grow this map without limit by
+            // notifying on arbitrary handles with large payloads.
+            if (notifyHandles_.find(param->notify.handle) == notifyHandles_.end()) {
+                unlock();
+                break;
+            }
             std::string val(reinterpret_cast<const char*>(param->notify.value),
-                            param->notify.value_len);
+                            gattcore::clampGattValueLen(param->notify.value_len));
             std::string hex = hexEncode(reinterpret_cast<const uint8_t*>(val.data()),
                                         val.length());
             notifyValues_[param->notify.handle] = hex;
@@ -723,7 +837,17 @@ void BLEScanner::gattLoadServices() {
         unlock();
         return;
     }
-    esp_gattc_db_elem_t* db = new esp_gattc_db_elem_t[count];
+    // `count` is controlled by the peer: bound it, and never let an
+    // allocation failure throw on this task (an uncaught bad_alloc aborts).
+    count = gattcore::clampGattDbCount(count);
+    esp_gattc_db_elem_t* db = new (std::nothrow) esp_gattc_db_elem_t[count];
+    if (db == nullptr) {
+        lock();
+        services_.clear();
+        gattFail();
+        unlock();
+        return;
+    }
     uint16_t got = count;
     if (esp_ble_gattc_get_db(gif, cid, 1, 0xFFFF, db, &got) != ESP_OK) {
         delete[] db;

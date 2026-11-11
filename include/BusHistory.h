@@ -175,6 +175,12 @@ public:
     // Query platform free heap (mockable via NATIVE_TEST).
     static uint32_t freeHeapBytes();
 
+    // Boot-time memory policy (see MemoryPlan.h): measure the auto budget
+    // against free PSRAM instead of internal heap, and cap it at `heapCap`
+    // bytes (0 = uncapped).  Call before begin().  An explicit
+    // ramBudgetBytes in the persisted config still takes precedence.
+    static void setMemoryPolicy(bool inPsram, uint32_t heapCap);
+
     // Compute per-type capacities from a total byte budget split equally.
     // Public so tests can verify the allocation arithmetic directly.
     static BusHistoryConfig autoConfig(uint32_t budgetBytes,

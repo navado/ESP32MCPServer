@@ -28,6 +28,16 @@ inline bool gattStateConnected(GattState s) {
            s == GattState::Reading || s == GattState::NotifyWait;
 }
 
+// True while an enumeration started by ble/services/start is still running.
+// `Connected` alone means the enumeration is FINISHED (or never started), so
+// it must not count as busy; it is busy only while a completed discovery is
+// waiting for the task to load the service database (loadPending).
+inline bool gattEnumInProgress(GattState s, bool loadPending) {
+    return s == GattState::Discovering || s == GattState::Reading ||
+           s == GattState::NotifyWait ||
+           (s == GattState::Connected && loadPending);
+}
+
 // A deadline measured from a start millis value.  nowMillis() must be
 // monotonic (e.g. millis() on ESP32).
 inline bool deadlineExpired(uint32_t startMillis, uint32_t timeoutMs,
@@ -40,6 +50,30 @@ constexpr uint32_t READ_OP_TIMEOUT_MS        = 5000;   // per characteristic rea
 constexpr uint32_t DISCOVERY_TIMEOUT_MS      = 10000;  // whole service discovery
 constexpr uint32_t NOTIFY_CAPTURE_TIMEOUT_MS = 3000;   // capture window
 constexpr uint32_t CLOSE_TIMEOUT_MS          = 2000;   // close handshake
+
+// Peer-controlled sizes are bounded before anything is allocated: a malicious
+// or broken peripheral must not be able to exhaust the heap from the BLE task
+// (where an uncaught bad_alloc aborts the firmware).
+constexpr uint16_t MAX_GATT_DB_ATTRS   = 512;  // attributes copied from the GATT cache
+constexpr size_t   MAX_GATT_VALUE_BYTES = 64;  // stored bytes per read/notified value
+
+inline uint16_t clampGattDbCount(uint16_t count) {
+    return count > MAX_GATT_DB_ATTRS ? MAX_GATT_DB_ATTRS : count;
+}
+
+inline size_t clampGattValueLen(size_t len) {
+    return len > MAX_GATT_VALUE_BYTES ? MAX_GATT_VALUE_BYTES : len;
+}
+
+// Upper bound for the client-supplied notifyCaptureMs.  ble/services/results
+// blocks the MCP task while it waits, so an unbounded value would stall the
+// WebSocket loop (and every other client) for as long as the caller asked.
+constexpr uint32_t MAX_NOTIFY_CAPTURE_MS     = 10000;
+
+inline uint32_t clampNotifyCaptureMs(uint32_t requestedMs) {
+    return requestedMs > MAX_NOTIFY_CAPTURE_MS ? MAX_NOTIFY_CAPTURE_MS
+                                               : requestedMs;
+}
 
 // A UUID in the byte layout Bluedroid uses: 16-bit and 32-bit UUIDs are
 // scalar values (host-endian, e.g. 0x1800); 128-bit UUIDs are little-endian

@@ -176,6 +176,32 @@ void test_concurrent_clients() {
     TEST_ASSERT_EQUAL(2, notifications.size());
 }
 
+void test_remove_client_drops_its_subscriptions() {
+    MCPResource testResource("test", "test://reuse", "application/json", "Slot reuse");
+    server->registerResource(testResource);
+
+    const char* subscribeRequest = R"({
+        "jsonrpc": "2.0",
+        "method": "resources/subscribe",
+        "params": {"uri": "test://reuse"},
+        "id": 8
+    })";
+    mockWs->simulateMessage(1, subscribeRequest);
+    mockWs->simulateMessage(2, subscribeRequest);
+
+    // Client 1 disconnects; a new client reusing slot 1 must not inherit
+    // the old subscription, while client 2 keeps receiving updates.
+    server->removeClient(1);
+    mockWs->clearNotifications();
+    server->broadcastResourceUpdate("test://reuse");
+    TEST_ASSERT_EQUAL(1, mockWs->getAllNotifications().size());
+
+    server->removeClient(2);
+    mockWs->clearNotifications();
+    server->broadcastResourceUpdate("test://reuse");
+    TEST_ASSERT_EQUAL(0, mockWs->getAllNotifications().size());
+}
+
 int runUnityTests() {
     UNITY_BEGIN();
     
@@ -186,6 +212,7 @@ int runUnityTests() {
     RUN_TEST(test_error_handling);
     RUN_TEST(test_handler_bad_alloc_returns_error_and_server_survives);
     RUN_TEST(test_concurrent_clients);
+    RUN_TEST(test_remove_client_drops_its_subscriptions);
     
     return UNITY_END();
 }

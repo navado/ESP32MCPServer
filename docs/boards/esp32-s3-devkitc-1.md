@@ -5,12 +5,13 @@
 | Item | Value |
 |------|-------|
 | Chip | ESP32-S3 (dual-core Xtensa LX7 @ 240 MHz) |
-| Flash | 8 MB (N8R8 variant) |
-| PSRAM | 8 MB (N8R8 variant) |
+| Flash | 8 MB (N8, N8R2, N8R8) or 16 MB (N16R8) |
+| PSRAM | None (N8), 2 MB quad (N8R2), or 8 MB octal (N8R8 / N16R8) |
 | Connectivity | 2.4 GHz WiFi 4 (802.11 b/g/n) + BLE 5.0 |
 | USB | Dual USB-C: USB JTAG/CDC + USB OTG |
 | MCP transport | Full (WebSocket + mDNS + UDP discovery) |
-| PlatformIO env | `esp32-s3-devkitc-1` |
+| BLE via MCP (`ble/*`) | Yes — scanner + GATT client, see the README's *Bluetooth (BLE)* section |
+| PlatformIO env | `esp32-s3-devkitc-1` (any module) or `esp32-s3-devkitc-1-n16r8` (8 MB octal PSRAM) |
 | Where to buy | [Espressif Store](https://www.espressif.com/en/products/devkits), Mouser, DigiKey, Amazon |
 
 ## Pinout Reference
@@ -94,16 +95,51 @@ GPIO16 (UART1 RX) ──────────  TX
 
 ## Build Configuration
 
+Two envs target this board.  Pick by module (`esptool.py chip_id` prints the PSRAM, e.g.
+`Features: WiFi, BLE, Embedded PSRAM 8MB (AP_3v3)` on an N16R8):
+
+| Module | Env | PSRAM used |
+|---|---|---|
+| N8, N8R2, unknown | `esp32-s3-devkitc-1` | No |
+| N8R8, N16R8 | `esp32-s3-devkitc-1-n16r8` | Yes (8 MB octal) |
+
 ```ini
-# platformio.ini
+# platformio.ini (abridged)
 [env:esp32-s3-devkitc-1]
-platform  = espressif32
-board     = esp32-s3-devkitc-1
-framework = arduino
+extends = esp32_base
+board   = esp32-s3-devkitc-1
 build_flags =
-    -std=gnu++17
+    ${esp32_base.build_flags}
     -D BOARD_ESP32_S3_DEVKITC1
+
+[env:esp32-s3-devkitc-1-n16r8]
+extends = env:esp32-s3-devkitc-1
+board_build.arduino.memory_type = qio_opi
+build_flags =
+    ${env:esp32-s3-devkitc-1.build_flags}
+    -D BOARD_HAS_PSRAM
 ```
+
+> Do not flash the `-n16r8` env on a module without PSRAM or with quad PSRAM (N8R2): the
+> octal memory mode is fixed at build time.
+
+All ESP32 envs extend `[esp32_base]`, which pins `platform = platformio/espressif32@6.9.0`
+(Arduino core 2.0.17).  Do not use an unqualified `espressif32`: on machines with a
+pioarduino / Arduino core 3.x platform installed it resolves to that platform, whose
+`Network/NetworkManager.h` shadows this project's header and breaks the build.
+
+### Memory plan
+
+At boot the firmware logs its memory plan on the serial console, e.g.
+`[mem] plan=psram psram=8386035 busHistoryCap=1048576 bleDevices=64 bleBytes=49152`.
+
+| Env | Plan | Bus history | BLE capture |
+|---|---|---|---|
+| `esp32-s3-devkitc-1-n16r8` | `psram` | in PSRAM, up to 1 MB | 64 devices / 48 KB |
+| `esp32-s3-devkitc-1` | `shared-internal` | internal heap, ≤ 96 KB | 24 devices / 16 KB |
+
+Measured on an N16R8 during GATT enumeration of a phone: minimum free internal heap
+86 KB with the `-n16r8` env, 49 KB with the generic env.
 
 ## Notes
 

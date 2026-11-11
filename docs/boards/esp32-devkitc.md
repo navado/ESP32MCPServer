@@ -10,6 +10,7 @@
 | Connectivity | 2.4 GHz WiFi 4 + Bluetooth 4.2 Classic + BLE |
 | USB | Micro-USB via CP2102/CH340 UART bridge |
 | MCP transport | Full (WebSocket + mDNS + UDP discovery) |
+| BLE via MCP (`ble/*`) | Not available — compiled out: the BLE stack does not fit the 4 MB flash budget alongside the WebSocket transport and OTA (the radio itself supports BLE) |
 | PlatformIO env | `esp32-devkitc` |
 | Where to buy | Amazon, AliExpress, Adafruit, SparkFun, Mouser |
 
@@ -89,14 +90,43 @@ GPIO16 (UART2 RX) ──────────  TX
 ## Build Configuration
 
 ```ini
+# platformio.ini (abridged)
 [env:esp32-devkitc]
-platform  = espressif32
-board     = esp32dev
-framework = arduino
+extends = esp32_base
+board   = esp32dev
+board_build.partitions = partitions_4mb_ota.csv
+build_src_filter =
+    ${esp32_base.build_src_filter}
+    -<BLEScanner.cpp>
 build_flags =
-    -std=gnu++17
+    ${esp32_base.build_flags}
     -D BOARD_ESP32_DEVKITC
 ```
+
+All ESP32 envs extend `[esp32_base]`, which pins `platform = platformio/espressif32@6.9.0`
+(Arduino core 2.0.17).  Do not use an unqualified `espressif32`: on machines with a
+pioarduino / Arduino core 3.x platform installed it resolves to that platform, whose
+`Network/NetworkManager.h` shadows this project's header and breaks the build.
+
+### Flash layout and upgrading existing boards
+
+This env uses `partitions_4mb_ota.csv` (the default 4 MB layout's 1.25 MB app slots are too
+small for the WebSocket transport + OTA):
+
+| Partition | Offset | Size | Contents |
+|---|---|---|---|
+| nvs | 0x9000 | 20 KB | WiFi credentials, OTA password (same offset as before) |
+| otadata | 0xE000 | 8 KB | OTA slot selection |
+| app0 / app1 | 0x10000 / 0x1E0000 | 1.81 MB each | firmware (OTA A/B) |
+| spiffs | 0x3B0000 | 128 KB | LittleFS: web UI, bus-history config, metrics |
+| coredump | 0x3D0000 | 64 KB | crash dumps |
+
+> **Upgrading a board that runs older firmware:** a partition table cannot be changed over
+> OTA, so flash **over USB** once (`pio run -e esp32-devkitc -t upload`, which writes the bootloader,
+> partition table and app).  The filesystem moves and shrinks (previously 1.4 MB at
+> 0x291000), so its contents are lost: re-upload the web UI with
+> `pio run -e esp32-devkitc -t uploadfs`.  NVS is unchanged, so WiFi credentials and the OTA
+> password are kept.
 
 ## Notes
 

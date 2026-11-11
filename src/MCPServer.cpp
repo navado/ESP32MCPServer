@@ -40,6 +40,7 @@ void MCPServer::onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, s
             onClientConnect(num);
             break;
         case WStype_DISCONNECTED:
+            removeClient(num);
             break;
         case WStype_TEXT: {
             if (payload == nullptr || length == 0) break;
@@ -251,6 +252,17 @@ std::string MCPServer::handleUnsubscribe(uint8_t clientId, uint32_t id,
     JsonDocument result;
     result["success"] = true;
     return makeResult(id, result);
+}
+
+void MCPServer::removeClient(uint8_t clientId) {
+    for (auto it = subscriptions_.begin(); it != subscriptions_.end();) {
+        it->second.erase(clientId);
+        if (it->second.empty()) {
+            it = subscriptions_.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -12,6 +12,7 @@
 | LiPo charging | Yes — JST 2-pin connector with onboard MCP73831 charger |
 | Form factor | Adafruit Feather (compatible with FeatherWings) |
 | MCP transport | Full (WebSocket + mDNS + UDP discovery) |
+| BLE via MCP (`ble/*`) | Not available — compiled out: the BLE stack does not fit the 4 MB flash budget alongside the WebSocket transport and OTA (the radio itself supports BLE) |
 | PlatformIO env | `adafruit-huzzah32` |
 | Where to buy | [Adafruit #3405](https://www.adafruit.com/product/3405), Amazon, Digi-Key |
 
@@ -108,14 +109,43 @@ The `BOARD_VBAT_PIN` macro resolves to GPIO35 (labelled A13 on the board).
 ## Build Configuration
 
 ```ini
+# platformio.ini (abridged)
 [env:adafruit-huzzah32]
-platform  = espressif32
-board     = featheresp32
-framework = arduino
+extends = esp32_base
+board   = featheresp32
+board_build.partitions = partitions_4mb_ota.csv
+build_src_filter =
+    ${esp32_base.build_src_filter}
+    -<BLEScanner.cpp>
 build_flags =
-    -std=gnu++17
+    ${esp32_base.build_flags}
     -D BOARD_ADAFRUIT_HUZZAH32
 ```
+
+All ESP32 envs extend `[esp32_base]`, which pins `platform = platformio/espressif32@6.9.0`
+(Arduino core 2.0.17).  Do not use an unqualified `espressif32`: on machines with a
+pioarduino / Arduino core 3.x platform installed it resolves to that platform, whose
+`Network/NetworkManager.h` shadows this project's header and breaks the build.
+
+### Flash layout and upgrading existing boards
+
+This env uses `partitions_4mb_ota.csv` (the default 4 MB layout's 1.25 MB app slots are too
+small for the WebSocket transport + OTA):
+
+| Partition | Offset | Size | Contents |
+|---|---|---|---|
+| nvs | 0x9000 | 20 KB | WiFi credentials, OTA password (same offset as before) |
+| otadata | 0xE000 | 8 KB | OTA slot selection |
+| app0 / app1 | 0x10000 / 0x1E0000 | 1.81 MB each | firmware (OTA A/B) |
+| spiffs | 0x3B0000 | 128 KB | LittleFS: web UI, bus-history config, metrics |
+| coredump | 0x3D0000 | 64 KB | crash dumps |
+
+> **Upgrading a board that runs older firmware:** a partition table cannot be changed over
+> OTA, so flash **over USB** once (`pio run -e adafruit-huzzah32 -t upload`, which writes the bootloader,
+> partition table and app).  The filesystem moves and shrinks (previously 1.4 MB at
+> 0x291000), so its contents are lost: re-upload the web UI with
+> `pio run -e adafruit-huzzah32 -t uploadfs`.  NVS is unchanged, so WiFi credentials and the OTA
+> password are kept.
 
 ## Notes
 

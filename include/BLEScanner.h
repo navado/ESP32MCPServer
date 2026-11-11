@@ -65,8 +65,21 @@ public:
     // ---- Advertising scanning ----------------------------------------------
 
     // Start an advertising scan for `durationMs` (0 = continuous until stop()).
+    // `filter` decides which NEW devices are captured at all (default: all).
     // Returns true if a scan was started.  Non-blocking.
-    bool startScan(uint32_t durationMs);
+    bool startScan(uint32_t durationMs,
+                   const blecore::CaptureFilter& filter = blecore::CaptureFilter());
+
+    // Capture filter of the current/last scan.
+    blecore::CaptureFilter getCaptureFilter() const;
+
+    // Devices evicted (LRU) this scan to respect the capture limits.
+    uint32_t getDevicesEvicted() const;
+
+    // Capture limits, set once at boot from the MemoryPlan.  maxDevices is
+    // clamped to [1, blecore::MAX_DEVICES_LIMIT].
+    void setCaptureLimits(size_t maxDevices, size_t maxBytes);
+    size_t getMaxDevices() const;
 
     // Stop a running scan.  Safe to call from a normal task context.
     void stopScan();
@@ -79,6 +92,9 @@ public:
 
     // MAC-independent payload registry snapshot (first-seen order).
     std::vector<BLEPayloadEntry> getPayloadRegistry();
+
+    // Distinct payloads discarded because the registry was full (this scan).
+    uint32_t getRegistryDropped() const;
 
     // millis() when the current/last scan started.
     uint64_t getScanStartedAt() const;
@@ -99,7 +115,15 @@ public:
     // attempt was started; the open handshake completes (or is aborted) in
     // the background within `timeoutMs`.  Poll isConnected() /
     // isConnecting() or ble/connect/results for the outcome.
-    bool connect(const std::string& mac, uint32_t timeoutMs = 5000);
+    //
+    // `addrType` is the peer's address type (blecore::ADDR_TYPE_*).  Pass -1
+    // to use the type recorded by the last scan for this MAC (public if the
+    // MAC was not seen).  Random/RPA peers cannot be opened as public.
+    bool connect(const std::string& mac, uint32_t timeoutMs = 5000,
+                 int addrType = -1);
+
+    // Address type used by the current/last connect attempt.
+    uint8_t getPeerAddrType() const;
 
     // True while an async connect attempt is still in flight.
     bool isConnecting() const;
@@ -145,6 +169,11 @@ public:
                       esp_ble_gattc_cb_param_t* param);
 
 private:
+    // Evict least-recently-heard devices (never `keepMac`) until the capture
+    // fits MAX_CAPTURE_BYTES.  Mutex held by the caller.
+    void enforceCaptureBudget(const std::string& keepMac);
+    void evictAt(size_t idx);
+
     // ---- GATT task ---------------------------------------------------------
 
     void gattTaskBody();
@@ -170,6 +199,12 @@ private:
     std::map<std::string, std::map<std::string, bool>> seenPayloads_;
     // MAC-independent distinct payload registry (first-seen order).
     std::vector<BLEPayloadEntry> payloadRegistry_;
+    uint32_t registryDropped_ = 0;
+    uint32_t devicesEvicted_ = 0;
+    size_t maxDevices_ = blecore::MAX_DEVICES;
+    size_t maxCaptureBytes_ = blecore::MAX_CAPTURE_BYTES;
+    blecore::CaptureFilter filter_;
+    uint8_t peerAddrType_ = 0;     // blecore::ADDR_TYPE_* of the connect target
     uint64_t scanStartedAt_ = 0;   // millis() at scan start
     uint32_t scanDurationMs_ = 0;  // requested duration (0 = continuous)
     std::vector<BLEServiceInfo> services_;

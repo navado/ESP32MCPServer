@@ -119,6 +119,48 @@ void test_properties_all_flags(void) {
         propertiesString(0xFF).c_str());
 }
 
+void test_enum_in_progress_states(void) {
+    TEST_ASSERT_TRUE(gattEnumInProgress(GattState::Discovering, false));
+    TEST_ASSERT_TRUE(gattEnumInProgress(GattState::Reading, false));
+    TEST_ASSERT_TRUE(gattEnumInProgress(GattState::NotifyWait, false));
+    TEST_ASSERT_TRUE(gattEnumInProgress(GattState::Connected, true));   // load pending
+}
+
+void test_enum_finished_or_idle_not_in_progress(void) {
+    // Connected without a pending load = enumeration finished: results must
+    // return immediately instead of waiting out notifyCaptureMs + 10 s.
+    TEST_ASSERT_FALSE(gattEnumInProgress(GattState::Connected, false));
+    TEST_ASSERT_FALSE(gattEnumInProgress(GattState::Idle, false));
+    TEST_ASSERT_FALSE(gattEnumInProgress(GattState::Connecting, false));
+    TEST_ASSERT_FALSE(gattEnumInProgress(GattState::Closing, false));
+}
+
+void test_gatt_db_count_clamped(void) {
+    TEST_ASSERT_EQUAL_UINT16(37, clampGattDbCount(37));
+    TEST_ASSERT_EQUAL_UINT16(MAX_GATT_DB_ATTRS, clampGattDbCount(MAX_GATT_DB_ATTRS));
+    TEST_ASSERT_EQUAL_UINT16(MAX_GATT_DB_ATTRS, clampGattDbCount(0xFFFF));
+}
+
+void test_gatt_value_len_clamped(void) {
+    TEST_ASSERT_EQUAL(0, clampGattValueLen(0));
+    TEST_ASSERT_EQUAL(20, clampGattValueLen(20));
+    TEST_ASSERT_EQUAL(MAX_GATT_VALUE_BYTES, clampGattValueLen(512));
+}
+
+void test_notify_capture_clamp_passes_small_values(void) {
+    TEST_ASSERT_EQUAL_UINT32(0, clampNotifyCaptureMs(0));
+    TEST_ASSERT_EQUAL_UINT32(3000, clampNotifyCaptureMs(3000));
+    TEST_ASSERT_EQUAL_UINT32(MAX_NOTIFY_CAPTURE_MS,
+                             clampNotifyCaptureMs(MAX_NOTIFY_CAPTURE_MS));
+}
+
+void test_notify_capture_clamp_caps_large_values(void) {
+    TEST_ASSERT_EQUAL_UINT32(MAX_NOTIFY_CAPTURE_MS,
+                             clampNotifyCaptureMs(600000));
+    TEST_ASSERT_EQUAL_UINT32(MAX_NOTIFY_CAPTURE_MS,
+                             clampNotifyCaptureMs(0xFFFFFFFFu));
+}
+
 void test_properties_none_empty(void) {
     TEST_ASSERT_EQUAL_STRING("", propertiesString(0).c_str());
 }
@@ -141,6 +183,12 @@ int runUnityTests(void) {
     RUN_TEST(test_properties_read_notify);
     RUN_TEST(test_properties_all_flags);
     RUN_TEST(test_properties_none_empty);
+    RUN_TEST(test_gatt_db_count_clamped);
+    RUN_TEST(test_gatt_value_len_clamped);
+    RUN_TEST(test_enum_in_progress_states);
+    RUN_TEST(test_enum_finished_or_idle_not_in_progress);
+    RUN_TEST(test_notify_capture_clamp_passes_small_values);
+    RUN_TEST(test_notify_capture_clamp_caps_large_values);
     return UNITY_END();
 }
 

@@ -343,6 +343,146 @@ void test_record_payload_truncation_deduplicates_to_common_prefix(void) {
 
 // ---------------------------------------------------------------------------
 
+// ---- follow-ups (#10) ------------------------------------------------------
+
+void test_addr_type_names_roundtrip(void) {
+    for (uint8_t t = ADDR_TYPE_PUBLIC; t <= ADDR_TYPE_RPA_RANDOM; ++t) {
+        uint8_t out = 0xFF;
+        TEST_ASSERT_TRUE(parseAddrType(addrTypeName(t), out));
+        TEST_ASSERT_EQUAL_UINT8(t, out);
+    }
+    uint8_t out = 0;
+    TEST_ASSERT_TRUE(parseAddrType("RANDOM", out));
+    TEST_ASSERT_EQUAL_UINT8(ADDR_TYPE_RANDOM, out);
+    TEST_ASSERT_FALSE(parseAddrType("static", out));
+    TEST_ASSERT_FALSE(parseAddrType("", out));
+}
+
+void test_lookup_addr_type_case_insensitive(void) {
+    std::vector<mcp::BLEAdvReport> reports(2);
+    reports[0].mac = "aa:bb:cc:dd:ee:01"; reports[0].addrType = ADDR_TYPE_PUBLIC;
+    reports[1].mac = "d7:2f:77:38:f1:eb"; reports[1].addrType = ADDR_TYPE_RANDOM;
+    uint8_t t = 0xFF;
+    TEST_ASSERT_TRUE(lookupAddrType(reports, "D7:2F:77:38:F1:EB", t));
+    TEST_ASSERT_EQUAL_UINT8(ADDR_TYPE_RANDOM, t);
+    TEST_ASSERT_FALSE(lookupAddrType(reports, "11:22:33:44:55:66", t));
+}
+
+void test_merge_fills_name_from_scan_response(void) {
+    mcp::BLEAdvReport r;
+    r.mac = "aa:bb:cc:dd:ee:ff";
+    mergeReportFields(r, "", "", "");                     // first adv: nothing
+    TEST_ASSERT_TRUE(r.name.empty());
+    mergeReportFields(r, "MX Master 4", "180f", "4c00");  // scan response
+    TEST_ASSERT_EQUAL_STRING("MX Master 4", r.name.c_str());
+    TEST_ASSERT_EQUAL_STRING("180f", r.servicesHex.c_str());
+    TEST_ASSERT_EQUAL_STRING("4c00", r.manufacturer.c_str());
+}
+
+void test_merge_does_not_overwrite_known_fields(void) {
+    mcp::BLEAdvReport r;
+    r.name = "first"; r.servicesHex = "aaaa"; r.manufacturer = "0001";
+    mergeReportFields(r, "second", "bbbb", "0002");
+    TEST_ASSERT_EQUAL_STRING("first", r.name.c_str());
+    TEST_ASSERT_EQUAL_STRING("aaaa", r.servicesHex.c_str());
+    TEST_ASSERT_EQUAL_STRING("0001", r.manufacturer.c_str());
+}
+
+void test_registry_counts_dropped_when_full(void) {
+    std::vector<BLEPayloadEntry> reg;
+    uint32_t dropped = 0;
+    char buf[16];
+    for (size_t i = 0; i < MAX_REGISTRY_PAYLOADS + 5; ++i) {
+        snprintf(buf, sizeof(buf), "%04zx", i);
+        recordRegistryPayload(reg, buf, 1000 + i, &dropped);
+    }
+    TEST_ASSERT_EQUAL(MAX_REGISTRY_PAYLOADS, reg.size());
+    TEST_ASSERT_EQUAL_UINT32(5, dropped);
+    // A repeat of a retained payload is not a drop.
+    recordRegistryPayload(reg, "0000", 5000, &dropped);
+    TEST_ASSERT_EQUAL_UINT32(5, dropped);
+}
+
+// ---- capture buffer: LRU eviction, byte budget, capture filter (#10) --------
+
+static mcp::BLEAdvReport makeReport(const char* mac, uint64_t lastSeen) {
+    mcp::BLEAdvReport r;
+    r.mac = mac;
+    r.firstSeen = 1;
+    r.lastSeen = lastSeen;
+    return r;
+}
+
+void test_lru_evicts_least_recently_heard_not_first_seen(void) {
+    std::vector<mcp::BLEAdvReport> reports;
+    reports.push_back(makeReport("aa:00:00:00:00:01", 900));  // seen first, still active
+    reports.push_back(makeReport("aa:00:00:00:00:02", 100));  // gone quiet
+    reports.push_back(makeReport("aa:00:00:00:00:03", 500));
+    TEST_ASSERT_EQUAL(1, lruIndex(reports));
+}
+
+void test_lru_respects_exclude(void) {
+    std::vector<mcp::BLEAdvReport> reports;
+    reports.push_back(makeReport("aa:00:00:00:00:01", 100));
+    reports.push_back(makeReport("aa:00:00:00:00:02", 200));
+    TEST_ASSERT_EQUAL(1, lruIndex(reports, "aa:00:00:00:00:01"));
+    std::vector<mcp::BLEAdvReport> empty;
+    TEST_ASSERT_EQUAL(0, lruIndex(empty));
+}
+
+void test_capture_bytes_grows_with_history(void) {
+    mcp::BLEAdvReport r = makeReport("aa:00:00:00:00:01", 1);
+    size_t base = reportBytes(r);
+    r.payloadHistory.push_back(std::string(MAX_PAYLOAD_HEX, 'a'));
+    TEST_ASSERT_TRUE(reportBytes(r) >= base + MAX_PAYLOAD_HEX);
+    // Compare against the stored copies: copying a std::string may change its
+    // capacity (libstdc++ shrinks to size, libc++ does not), and the estimate
+    // is capacity-based.
+    std::vector<mcp::BLEAdvReport> reports{r, r};
+    TEST_ASSERT_EQUAL(reportBytes(reports[0]) + reportBytes(reports[1]), captureBytes(reports));
+}
+
+void test_budget_bounds_worst_case_capture(void) {
+    // A device holding a full deep history must fit the budget on its own,
+    // otherwise enforcement could never get under it.
+    mcp::BLEAdvReport r = makeReport("aa:00:00:00:00:01", 1);
+    for (size_t i = 0; i < MAX_PAYLOADS; ++i) r.payloadHistory.push_back(std::string(MAX_PAYLOAD_HEX, 'a'));
+    TEST_ASSERT_TRUE(reportBytes(r) < MAX_CAPTURE_BYTES);
+    // ...but MAX_DEVICES such devices would not, which is why the budget exists.
+    TEST_ASSERT_TRUE(reportBytes(r) * MAX_DEVICES > MAX_CAPTURE_BYTES);
+}
+
+void test_capture_filter_default_matches_everything(void) {
+    CaptureFilter f;
+    TEST_ASSERT_FALSE(f.active());
+    TEST_ASSERT_TRUE(captureMatches(f, "AA:BB:CC:DD:EE:FF", -100, "", ""));
+}
+
+void test_capture_filter_min_rssi(void) {
+    CaptureFilter f; f.minRssi = -60;
+    TEST_ASSERT_TRUE(f.active());
+    TEST_ASSERT_TRUE(captureMatches(f, "aa:bb:cc:dd:ee:ff", -60, "", ""));
+    TEST_ASSERT_FALSE(captureMatches(f, "aa:bb:cc:dd:ee:ff", -61, "", ""));
+}
+
+void test_capture_filter_manufacturer_prefix_little_endian(void) {
+    CaptureFilter f; f.manufacturerPrefix = "adde";   // company id 0xDEAD
+    TEST_ASSERT_TRUE(captureMatches(f, "aa:bb:cc:dd:ee:ff", -50, "", "ADDEBEAF"));
+    TEST_ASSERT_FALSE(captureMatches(f, "aa:bb:cc:dd:ee:ff", -50, "", "4c001006"));
+    TEST_ASSERT_FALSE(captureMatches(f, "aa:bb:cc:dd:ee:ff", -50, "", ""));
+}
+
+void test_capture_filter_service_and_mac_prefix(void) {
+    CaptureFilter f;
+    f.serviceUuid = "6e400001";
+    f.macPrefix = "f0:68";
+    TEST_ASSERT_TRUE(captureMatches(f, "F0:68:E3:B3:40:B7", -50,
+                                    "6E400001-b5a3-f393-e0a9-e50e24dcca9e", ""));
+    TEST_ASSERT_FALSE(captureMatches(f, "d7:2f:77:38:f1:eb", -50,
+                                     "6e400001-b5a3-f393-e0a9-e50e24dcca9e", ""));
+    TEST_ASSERT_FALSE(captureMatches(f, "f0:68:e3:b3:40:b7", -50, "180f", ""));
+}
+
 int runUnityTests(void) {
     UNITY_BEGIN();
     RUN_TEST(test_hex_encode_basic);
@@ -377,6 +517,19 @@ int runUnityTests(void) {
     RUN_TEST(test_registry_truncates_and_dedupes_on_truncated_form);
     RUN_TEST(test_registry_bounds_at_max_and_ignores_new_distinct);
     RUN_TEST(test_registry_empty_ignored);
+    RUN_TEST(test_addr_type_names_roundtrip);
+    RUN_TEST(test_lookup_addr_type_case_insensitive);
+    RUN_TEST(test_merge_fills_name_from_scan_response);
+    RUN_TEST(test_merge_does_not_overwrite_known_fields);
+    RUN_TEST(test_registry_counts_dropped_when_full);
+    RUN_TEST(test_lru_evicts_least_recently_heard_not_first_seen);
+    RUN_TEST(test_lru_respects_exclude);
+    RUN_TEST(test_capture_bytes_grows_with_history);
+    RUN_TEST(test_budget_bounds_worst_case_capture);
+    RUN_TEST(test_capture_filter_default_matches_everything);
+    RUN_TEST(test_capture_filter_min_rssi);
+    RUN_TEST(test_capture_filter_manufacturer_prefix_little_endian);
+    RUN_TEST(test_capture_filter_service_and_mac_prefix);
     return UNITY_END();
 }
 

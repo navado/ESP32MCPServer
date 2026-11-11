@@ -11,6 +11,11 @@
 #include "BusHistory.h"
 #include "OTAManager.h"
 #include "BLEScanner.h"
+#include "MemoryPlan.h"
+
+#ifndef BOARD_BUS_HISTORY_HEAP_CAP
+#define BOARD_BUS_HISTORY_HEAP_CAP 0
+#endif
 
 // ---------------------------------------------------------------------------
 // Minimal ESP32 I2C implementation (wraps Arduino Wire library)
@@ -169,6 +174,23 @@ void setup() {
 #if BOARD_HAS_BLE
     bleScanner.begin();
 #endif
+
+    // Decide how bus history and BLE capture share memory, based on what this
+    // board actually has (PSRAM detected at runtime).  Must run before
+    // BUS_HISTORY.begin() allocates its ring buffers.
+    {
+        const mcp::mem::MemoryPlan plan = mcp::mem::planMemory(
+            psramFound(), static_cast<uint32_t>(ESP.getFreePsram()),
+            BOARD_HAS_BLE != 0, BOARD_BUS_HISTORY_HEAP_CAP);
+        mcp::BusHistory::setMemoryPolicy(plan.busHistoryInPsram, plan.busHistoryCap);
+#if BOARD_HAS_BLE
+        bleScanner.setCaptureLimits(plan.bleMaxDevices, plan.bleCaptureBytes);
+#endif
+        Serial.printf("[mem] plan=%s psram=%u busHistoryCap=%u bleDevices=%u bleBytes=%u\n",
+                      mcp::mem::modeName(plan.mode), (unsigned)ESP.getFreePsram(),
+                      (unsigned)plan.busHistoryCap, (unsigned)plan.bleMaxDevices,
+                      (unsigned)plan.bleCaptureBytes);
+    }
 
     // Initialize LittleFS
     if (!LittleFS.begin(true)) {
@@ -432,12 +454,30 @@ void setup() {
     mcpServer.registerMethodHandler("ble/scan",
         [](uint8_t, uint32_t id, const JsonObject& p) -> std::string {
             uint32_t durationMs = p["durationMs"] | 5000u;
-            bool started = bleScanner.startScan(durationMs);
+            // Optional capture filter: decides which devices are STORED (the
+            // ble/scan/results filters only shape the response).
+            mcp::blecore::CaptureFilter filter;
+            if (p["minRssi"].is<int>()) filter.minRssi = p["minRssi"].as<int>();
+            if (p["manufacturerId"].is<const char*>())
+                filter.manufacturerPrefix =
+                    mcp::blecore::toLowerCopy(p["manufacturerId"].as<const char*>());
+            if (p["serviceUuid"].is<const char*>())
+                filter.serviceUuid = mcp::blecore::toLowerCopy(p["serviceUuid"].as<const char*>());
+            if (p["macPrefix"].is<const char*>())
+                filter.macPrefix = mcp::blecore::toLowerCopy(p["macPrefix"].as<const char*>());
+            bool started = bleScanner.startScan(durationMs, filter);
             JsonDocument doc;
             doc["jsonrpc"] = "2.0";
             doc["id"] = id;
             doc["result"]["started"] = started;
             doc["result"]["scanning"] = bleScanner.isScanning();
+            if (started && filter.active()) {
+                JsonObject cap = doc["result"]["capture"].to<JsonObject>();
+                if (filter.minRssi > -128) cap["minRssi"] = filter.minRssi;
+                if (!filter.manufacturerPrefix.empty()) cap["manufacturerId"] = filter.manufacturerPrefix;
+                if (!filter.serviceUuid.empty()) cap["serviceUuid"] = filter.serviceUuid;
+                if (!filter.macPrefix.empty()) cap["macPrefix"] = filter.macPrefix;
+            }
             if (!started) {
                 uint32_t dur = bleScanner.getScanDurationMs();
                 uint64_t startAt = bleScanner.getScanStartedAt();
@@ -483,6 +523,8 @@ void setup() {
             uint32_t dur = bleScanner.getScanDurationMs();
             if (startAt != 0) doc["result"]["scanStartedMs"] = millis() - startAt;
             if (dur != 0 || startAt != 0) doc["result"]["durationMs"] = dur;
+            doc["result"]["evicted"] = bleScanner.getDevicesEvicted();
+            doc["result"]["maxDevices"] = bleScanner.getMaxDevices();
             JsonArray arr = doc["result"]["devices"].to<JsonArray>();
             for (const auto& r : reports) {
                 if (!macFilter.empty()) {
@@ -497,8 +539,10 @@ void setup() {
                     o["services"]     = r.servicesHex;
                     o["manufacturer"] = r.manufacturer;
                     o["connectable"]  = r.isConnectable;
+                    o["addrType"]     = mcp::blecore::addrTypeName(r.addrType);
                     o["count"]        = r.count;
                     if (r.firstSeen != 0) o["firstSeen"] = r.firstSeen;
+                    if (r.lastSeen != 0) o["lastSeen"] = r.lastSeen;
                     JsonArray hist = o["payloadHistory"].to<JsonArray>();
                     for (const auto& pl : r.payloadHistory) {
                         hist.add(pl);
@@ -525,8 +569,10 @@ void setup() {
                 o["services"]     = r.servicesHex;
                 o["manufacturer"] = r.manufacturer;
                 o["connectable"]  = r.isConnectable;
+                o["addrType"]     = mcp::blecore::addrTypeName(r.addrType);
                 o["count"]        = r.count;
                 if (r.firstSeen != 0) o["firstSeen"] = r.firstSeen;
+                if (r.lastSeen != 0) o["lastSeen"] = r.lastSeen;
                 // Quick-look view: only the newest MAX_PAYLOADS_VIEW payloads.
                 JsonArray hist = o["payloadHistory"].to<JsonArray>();
                 constexpr size_t view = mcp::blecore::MAX_PAYLOADS_VIEW;
@@ -557,6 +603,7 @@ void setup() {
             uint32_t dur = bleScanner.getScanDurationMs();
             if (startAt != 0) doc["result"]["scanStartedMs"] = millis() - startAt;
             if (dur != 0 || startAt != 0) doc["result"]["durationMs"] = dur;
+            doc["result"]["dropped"] = bleScanner.getRegistryDropped();
             JsonArray arr = doc["result"]["payloads"].to<JsonArray>();
             for (const auto& e : registry) {
                 JsonObject o = arr.add<JsonObject>();
@@ -584,6 +631,7 @@ void setup() {
             uint32_t dur = bleScanner.getScanDurationMs();
             if (startAt != 0) doc["result"]["scanStartedMs"] = millis() - startAt;
             if (dur != 0 || startAt != 0) doc["result"]["durationMs"] = dur;
+            doc["result"]["dropped"] = bleScanner.getRegistryDropped();
             JsonArray arr = doc["result"]["payloads"].to<JsonArray>();
             for (const auto& e : registry) {
                 JsonObject o = arr.add<JsonObject>();
@@ -616,6 +664,20 @@ void setup() {
             std::string mac;
             if (p["mac"].is<const char*>()) mac = p["mac"].as<const char*>();
             uint32_t timeoutMs = p["timeoutMs"] | 5000u;
+            int addrType = -1;  // default: type recorded by the last scan
+            if (p["addrType"].is<const char*>()) {
+                uint8_t t = 0;
+                if (!mcp::blecore::parseAddrType(p["addrType"].as<const char*>(), t)) {
+                    JsonDocument doc;
+                    doc["jsonrpc"] = "2.0";
+                    doc["id"]      = id;
+                    doc["error"]["code"]    = -32602;
+                    doc["error"]["message"] =
+                        "Invalid params: addrType must be public|random|rpa-public|rpa-random";
+                    std::string out; serializeJson(doc, out); return out;
+                }
+                addrType = t;
+            }
             if (mac.empty()) {
                 JsonDocument doc;
                 doc["jsonrpc"] = "2.0";
@@ -624,13 +686,17 @@ void setup() {
                 doc["error"]["message"] = "Invalid params: mac required";
                 std::string out; serializeJson(doc, out); return out;
             }
-            bool started = bleScanner.connect(mac, timeoutMs);
+            bool started = bleScanner.connect(mac, timeoutMs, addrType);
             JsonDocument doc;
             doc["jsonrpc"] = "2.0";
             doc["id"] = id;
             doc["result"]["started"]    = started;
             doc["result"]["connecting"] = started && bleScanner.isConnecting();
             doc["result"]["connected"]  = bleScanner.isConnected();
+            if (started) {
+                doc["result"]["addrType"] =
+                    mcp::blecore::addrTypeName(bleScanner.getPeerAddrType());
+            }
             std::string out; serializeJson(doc, out); return out;
         });
 
