@@ -62,6 +62,14 @@ void test_aht20_read_temp_hum() {
         static_cast<uint8_t>(h >> 12), static_cast<uint8_t>(h >> 4),
         static_cast<uint8_t>(((h & 0x0F) << 4) | ((t >> 16) & 0x0F)),
         static_cast<uint8_t>(t >> 8), static_cast<uint8_t>(t & 0xFF), 0};
+    // CRC-8 (poly 0x31, init 0xFF) over the first 6 bytes
+    uint8_t crc = 0xFF;
+    for (int i = 0; i < 6; ++i) {
+        crc ^= raw[i];
+        for (int b = 0; b < 8; ++b)
+            crc = (crc & 0x80) ? (uint8_t)((crc << 1) ^ 0x31) : (uint8_t)(crc << 1);
+    }
+    raw[6] = crc;
     bus.setRawRead(0x38, raw, 7);
 
     AHT20Driver drv(bus, 0x38);

@@ -150,7 +150,10 @@ private:
     static bool crc8(const uint8_t* data, size_t len, uint8_t expected);
 };
 
-// AHT20 - temperature, humidity (Aosong). Address 0x38
+// ---------------------------------------------------------------------------
+// AHT20 — temperature, humidity (Aosong)
+// Address: 0x38 (fixed). No ID register; init() checks status/calibration.
+// ---------------------------------------------------------------------------
 class AHT20Driver : public I2CSensorDriver {
 public:
     explicit AHT20Driver(I2CInterface& bus, uint8_t addr = 0x38);
@@ -161,6 +164,8 @@ public:
     std::vector<std::string>   parameters() const override {
         return {"temperature","humidity"};
     }
+private:
+    bool readStatus(uint8_t& status);
 };
 
 // ---------------------------------------------------------------------------
