@@ -62,6 +62,16 @@ void test_session_idle_expiry_frees_slot(void) {
     TEST_ASSERT_NOT_NULL(t.create(auth::Access::Full, 1500, rnd));
 }
 
+void test_session_create_never_reclaims_silently(void) {
+    // An expired session's client id must come back through expire() so the
+    // server state is released; create() must not reuse the slot on its own.
+    SessionTable t(1, 1000);
+    t.create(auth::Access::Full, 0, rnd);
+    TEST_ASSERT_NULL(t.create(auth::Access::Full, 5000, rnd));
+    TEST_ASSERT_EQUAL(1, (int)t.expire(5000).size());
+    TEST_ASSERT_NOT_NULL(t.create(auth::Access::Full, 5000, rnd));
+}
+
 void test_session_use_keeps_it_alive(void) {
     SessionTable t(1, 1000);
     std::string id = t.create(auth::Access::Full, 0, rnd)->id;
@@ -140,6 +150,7 @@ int main(int, char**) {
     RUN_TEST(test_session_ids_and_client_ids_are_distinct);
     RUN_TEST(test_session_capacity);
     RUN_TEST(test_session_idle_expiry_frees_slot);
+    RUN_TEST(test_session_create_never_reclaims_silently);
     RUN_TEST(test_session_use_keeps_it_alive);
     RUN_TEST(test_session_remove);
     RUN_TEST(test_host_only);

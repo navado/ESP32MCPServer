@@ -9,7 +9,9 @@ SessionTable::SessionTable(size_t capacity, uint32_t idleMs)
 
 const Session* SessionTable::create(auth::Access access, uint32_t nowMs,
                                     const std::function<uint32_t()>& rnd) {
-    expire(nowMs);
+    // Expired slots are NOT reclaimed here: only expire() frees them, and its
+    // caller must release each returned client id in MCPServer.  Reclaiming
+    // silently would leak the server-side client state (and a client slot).
     for (size_t i = 0; i < slots_.size(); ++i) {
         Slot& sl = slots_[i];
         if (sl.used) continue;

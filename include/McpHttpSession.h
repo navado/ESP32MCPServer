@@ -28,8 +28,9 @@ public:
     // `capacity` concurrent sessions; idle sessions expire after `idleMs`.
     SessionTable(size_t capacity = 4, uint32_t idleMs = 10u * 60u * 1000u);
 
-    // Create a session.  Returns nullptr when every slot is taken by a live
-    // session.  `rnd` supplies randomness for the id.
+    // Create a session.  Returns nullptr when every slot is in use (expired
+    // sessions keep their slot until expire() hands their client id back for
+    // release).  `rnd` supplies randomness for the id.
     const Session* create(auth::Access access, uint32_t nowMs,
                           const std::function<uint32_t()>& rnd);
 
