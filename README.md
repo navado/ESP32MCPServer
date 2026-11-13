@@ -270,7 +270,56 @@ pio run -t upload -e nrf52840-dk
 2. Connect to that AP and open **`http://192.168.4.1`**.
 3. Enter your WiFi credentials and click Save.
 4. The board joins your network and prints its IP address on the serial console.
-5. Connect an MCP client to **`ws://<IP>:9000`**.
+5. On first boot the serial console prints a generated **MCP access token** and **OTA password** (shown once; type `token show` / `ota show` on the console to see them again).
+6. Connect an MCP client to **`ws://<IP>:9000`** with the token: header `Authorization: Bearer <token>`, or `ws://<IP>:9000/?token=<token>` from a browser. The dashboard asks for the token once and remembers it. See [Security](#security).
+
+---
+
+## Security
+
+The device is meant for a **trusted LAN**. The MCP WebSocket is authenticated; there is no TLS yet (see below).
+
+**Threat model.** Without a token, any host that can reach port 9000 could open BLE connections to nearby devices, read sensor, bus and metrics data, clear logs, and tie up the server. Authentication stops an unauthenticated host on the network from doing any of that. It does **not** protect against someone who can sniff the traffic: the token and all data travel in clear text over `ws://`, and the OTA password over plain HTTP Basic Auth. Physical access to the USB serial console is trusted: it can show and change every secret.
+
+**MCP access tokens** (NVS namespace `security`):
+
+| Token | Key | Access |
+|---|---|---|
+| Full control | `token` | Every method |
+| Read-only (optional) | `ro_token` | Observation only: `initialize`, `resources/*`, `sensors/*`, `metrics/*`, `logs/query`, `bus/history/read`, `bus/history/config/get`, `ble/scan*`, `ble/connect/results`. `ble/connect`, `ble/services/*`, `ble/disconnect`, `logs/clear`, `bus/history/config/set` and any method not on the list need full control |
+
+- On first boot with no token, a random 128-bit token is generated and printed once on the serial console.
+- Clients send it as `Authorization: Bearer <token>` or, from browsers (which cannot set WebSocket headers), as `?token=<token>`.
+- A connection without a valid token is closed with WebSocket close code **4401** before any message is processed. A read-only client calling a full-control method gets `-32020` (`data.required: "full"`).
+- Lab builds can set `-D MCP_ALLOW_UNAUTHENTICATED=1`: with **no token provisioned**, clients are then accepted without one (a provisioned token is still enforced). Never ship this.
+
+**Serial console** (115200 baud; type `help`):
+
+| Command | Effect |
+|---|---|
+| `token show` | Print both tokens |
+| `token rotate` / `token set <value>` | New random / chosen (≥ 16 chars) full-control token; reboots to apply |
+| `token ro rotate` / `token ro clear` | New / remove the read-only token; reboots |
+| `ota show` / `ota rotate` | Print / replace the OTA password (rotate reboots) |
+
+Tokens can also be pre-provisioned in an NVS image, like the WiFi credentials.
+
+**Resource limits.**
+
+| Limit | Default | Build flag | When exceeded |
+|---|---|---|---|
+| Concurrent MCP clients | 4 | `MCP_MAX_CLIENTS` | Close code **4429** |
+| Requests per client | burst 20, then 10/s | `MCP_RATE_BURST`, `MCP_RATE_PER_SEC` | `-32021 Rate limited` with `data.retryAfterMs` |
+| Idle clients | ping every 15 s | — | Dropped after 2 missed pongs |
+
+**OTA.**
+- There is no compiled-in default password. A random per-device password is generated on first boot, and also on a device that still holds the old `admin` default. It is printed once on the serial console.
+- After 5 consecutive wrong logins, OTA authentication is refused with `429` (and `Retry-After`) for 30 s, doubling up to 5 minutes per further failure. The lockout is device-wide, so a host on the LAN can delay a legitimate update, but it cannot brute-force the password.
+
+**Not covered yet.**
+- **TLS (`wss://`).** The WebSocket library used here has no server-side TLS on ESP32. On the 4 MB boards there is no flash headroom for it at all. On the ESP32-S3 it needs a different server stack, which is planned with the Streamable HTTP transport (#13). Until then, use a trusted network, or a TLS-terminating proxy or VPN.
+- The port-80 HTTP endpoints (dashboard, WiFi setup, `/bus-history`) are unauthenticated.
+- OAuth 2.1 (MCP authorization for HTTP transports) doesn't fit on the device. The static bearer token matches how MCP clients send `Authorization`, so it carries over to Streamable HTTP.
 
 ---
 
@@ -303,7 +352,7 @@ A browser-based dashboard is served from flash at **`http://<IP>/app`**.
 
 ## MCP API Reference (WebSocket port 9000)
 
-All methods use **JSON-RPC 2.0** over WebSocket.
+All methods use **JSON-RPC 2.0** over WebSocket. Connections require an access token (see [Security](#security)).
 
 ### Protocol
 

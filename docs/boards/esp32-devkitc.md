@@ -115,7 +115,7 @@ small for the WebSocket transport + OTA):
 
 | Partition | Offset | Size | Contents |
 |---|---|---|---|
-| nvs | 0x9000 | 20 KB | WiFi credentials, OTA password (same offset as before) |
+| nvs | 0x9000 | 20 KB | WiFi credentials, OTA password, MCP tokens (same offset as before) |
 | otadata | 0xE000 | 8 KB | OTA slot selection |
 | app0 / app1 | 0x10000 / 0x1E0000 | 1.81 MB each | firmware (OTA A/B) |
 | spiffs | 0x3B0000 | 128 KB | LittleFS: web UI, bus-history config, metrics |
@@ -125,8 +125,8 @@ small for the WebSocket transport + OTA):
 > OTA, so flash **over USB** once (`pio run -e esp32-devkitc -t upload`, which writes the bootloader,
 > partition table and app).  The filesystem moves and shrinks (previously 1.4 MB at
 > 0x291000), so its contents are lost: re-upload the web UI with
-> `pio run -e esp32-devkitc -t uploadfs`.  NVS is unchanged, so WiFi credentials and the OTA
-> password are kept.
+> `pio run -e esp32-devkitc -t uploadfs`.  NVS is unchanged, so WiFi credentials, the OTA
+> password and MCP tokens are kept.
 
 ## Notes
 
@@ -136,3 +136,7 @@ small for the WebSocket transport + OTA):
   modules (already pulled low on the DevKitC board).
 - **Flash mode**: The WROVER variant allows more RAM-intensive workloads thanks
   to 8 MB PSRAM; useful if expanding the metrics history ring buffer.
+
+## Security
+
+The MCP WebSocket requires an access token, and OTA uses a random per-device password. Both are printed once on the serial console at first boot (`token show` / `ota show` to see them again). **There is no TLS on this board:** the token and data travel in clear text, so use it on a trusted network. See [Security](../../README.md#security).

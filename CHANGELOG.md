@@ -5,6 +5,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+- **The MCP WebSocket requires an access token** — #12
+  - Full-control token, plus an optional read-only token, stored in NVS namespace
+    `security`. Sent as `Authorization: Bearer <token>` or `?token=<token>`.
+  - Generated on first boot and printed once on the serial console. Managed with the new
+    serial commands `token show|rotate|set`, `token ro rotate|clear`, `ota show|rotate`.
+  - Unauthenticated connections are closed with code 4401. A read-only token calling a
+    state-changing method gets `-32020`.
+  - `MCP_ALLOW_UNAUTHENTICATED=1` keeps the old open behaviour for lab builds without a
+    token.
+  - Limits: at most 4 clients (close code 4429); per-client rate limit of burst 20, then
+    10/s (`-32021`); a heartbeat drops dead clients.
+  - The dashboard and `examples/client/client.ts` take a token.
+- **OTA has no default password** — #12. A random per-device password is generated on
+  first boot (also replacing a stored `admin`). Repeated failed logins lock authentication
+  out with `429`.
+
 ### Added
 - **Bluetooth LE over MCP (ESP32-S3)** — #9, #11
   - Advertising scanner: `ble/scan`, `ble/scan/results`, `ble/scan/payloads`, `ble/scan/poll`, `ble/scan/stop`.
@@ -22,6 +39,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `partitions_4mb_ota.csv` with 1.81 MB OTA slots for 4 MB ESP32 boards — #9.
 
 ### Changed
+- **Upgrading: existing MCP clients must send the token** printed on the serial console
+  after flashing this version. The OTA password changes too if it was still `admin`. The
+  `isDefaultPwd` field is gone from `/ota/config` — #12.
 - **4 MB boards (`esp32-devkitc`, `adafruit-huzzah32`, `m5stack-core`) use a new partition
   table.** It cannot be applied over OTA: flash once over USB, then re-upload the web UI
   with `pio run -e <env> -t uploadfs` (the filesystem moves and shrinks to 128 KB, so its

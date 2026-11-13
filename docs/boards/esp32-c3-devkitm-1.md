@@ -115,3 +115,7 @@ This env keeps the default 4 MB partition layout (the RISC-V build fits the 1.25
 - **No Classic Bluetooth**: Only BLE 5.0 is available.
 - **Strapping pins**: GPIO2, GPIO8, GPIO9 affect boot mode.  GPIO8 is already
   the LED pin; do not pull it LOW externally.
+
+## Security
+
+The MCP WebSocket requires an access token, and OTA uses a random per-device password. Both are printed once on the serial console at first boot (`token show` / `ota show` to see them again). **There is no TLS on this board:** the token and data travel in clear text, so use it on a trusted network. See [Security](../../README.md#security).

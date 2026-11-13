@@ -149,3 +149,7 @@ Measured on an N16R8 during GATT enumeration of a phone: minimum free internal h
   Avoid using them unless you understand the implications.
 - **PSRAM**: The N8R8 variant has 8 MB PSRAM wired internally via Octal-SPI —
   no user pins are consumed.
+
+## Security
+
+The MCP WebSocket requires an access token, and OTA uses a random per-device password. Both are printed once on the serial console at first boot (`token show` / `ota show` to see them again). **There is no TLS on this board:** the token and data travel in clear text, so use it on a trusted network. See [Security](../../README.md#security).

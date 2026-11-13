@@ -5,6 +5,7 @@
 #include <Arduino.h>
 #include <Preferences.h>
 #include <Update.h>
+#include "AuthPolicy.h"
 #include <ESPAsyncWebServer.h>
 
 // ---------------------------------------------------------------------------
@@ -14,7 +15,6 @@
 //   OTA_USERNAME          HTTP Basic Auth username                ("admin")
 //   OTA_NVS_NAMESPACE     NVS namespace used to persist password  ("ota")
 //   OTA_NVS_PWD_KEY       NVS key for the password value          ("password")
-//   OTA_DEFAULT_PASSWORD  Password used on first boot             ("admin")
 //   OTA_MIN_PASSWORD_LEN  Minimum acceptable password length      (8)
 // ---------------------------------------------------------------------------
 #ifndef OTA_USERNAME
@@ -26,9 +26,9 @@
 #ifndef OTA_NVS_PWD_KEY
 #  define OTA_NVS_PWD_KEY      "password"
 #endif
-#ifndef OTA_DEFAULT_PASSWORD
-#  define OTA_DEFAULT_PASSWORD "admin"
-#endif
+// Legacy compiled-in default.  Never accepted: a device still holding it in
+// NVS gets a random password on the next boot (issue #12).
+#define OTA_LEGACY_DEFAULT_PASSWORD "admin"
 #ifndef OTA_MIN_PASSWORD_LEN
 #  define OTA_MIN_PASSWORD_LEN 8
 #endif
@@ -48,7 +48,12 @@
 //
 // Password storage:
 //   Stored in NVS namespace OTA_NVS_NAMESPACE, key OTA_NVS_PWD_KEY.
-//   Default on first boot: OTA_DEFAULT_PASSWORD  (change immediately after flashing!).
+//   There is no compiled-in default: on first boot (or if NVS still holds the
+//   old "admin" default) a random per-device password is generated and
+//   printed once on the serial console.  `ota show` / `ota rotate` on the
+//   serial console display or replace it.
+//   Failed logins: after 5 consecutive bad credentials, every auth attempt is
+//   refused with 429 for 30 s, doubling per further failure up to 5 min.
 //
 // Usage:
 //   OTAManager otaManager;
@@ -66,6 +71,13 @@ public:
     // Directly set the OTA password and persist it to NVS.
     void setPassword(const String& newPassword);
 
+    // Current password (serial console `ota show`).
+    const String& getPassword() const { return password_; }
+
+    // Generate and persist a new random password; takes effect after reboot
+    // (the HTTP task may be using the current one).  Returns the new password.
+    String rotatePassword();
+
     // Register all /ota/* routes on the provided web server.
     void registerRoutes(AsyncWebServer& server);
 
@@ -79,8 +91,14 @@ private:
     String      lastErrorMsg_;
     bool        uploadDone_     = false;
 
-    // Returns true when the request carries valid Basic Auth credentials.
+    // Returns true when the request carries valid Basic Auth credentials and
+    // authentication is not locked out.  Counts failed attempts.
     bool authenticate(AsyncWebServerRequest* request) const;
+    // authenticate(), answering 429 (locked out) or 401 itself on failure.
+    bool requireAuth(AsyncWebServerRequest* request) const;
+
+    mutable mcp::auth::FailureLockout lockout_{5, 30000, 300000};
+    static String generatePassword();
 
     // HTTP handler helpers.
     void handlePageGet(AsyncWebServerRequest* request) const;
