@@ -281,11 +281,25 @@ static void handleSerialCommand(const String& line) {
 // Client that subscribed to BLE notifications (issue #14).  Values are
 // pushed to it as notifications/ble/value when it is a WebSocket client;
 // otherwise (HTTP session, disconnected) they wait for ble/notifications.
-static int bleNotifyOwner = -1;
+// The owner is pinned to the connection (generation), not just the reusable
+// slot number, so a later client in the same slot never receives it.
+static int      bleNotifyOwner = -1;
+static uint32_t bleNotifyOwnerGen = 0;
 
 static void pushBleNotifications() {
-    if (bleNotifyOwner < 0 || bleNotifyOwner >= mcp::MCP_HTTP_CLIENT_BASE) return;
-    if (!mcpServer.hasClient(static_cast<uint8_t>(bleNotifyOwner))) return;
+    if (bleNotifyOwner < 0) return;
+    const uint8_t owner = static_cast<uint8_t>(bleNotifyOwner);
+    if (mcpServer.clientGeneration(owner) != bleNotifyOwnerGen) {
+        // The subscriber's connection is gone: forget it and discard values
+        // queued for it rather than hand them to whoever connects next.
+        bleNotifyOwner = -1;
+        bleNotifyOwnerGen = 0;
+        uint32_t ignored = 0;
+        bleScanner.drainNotifications(ignored);
+        return;
+    }
+    if (owner >= mcp::MCP_HTTP_CLIENT_BASE) return;  // HTTP sessions poll
+    if (mcpServer.clientAccess(owner) != mcp::auth::Access::Full) return;
     if (!bleScanner.hasNotifications()) return;
     uint32_t dropped = 0;
     auto events = bleScanner.drainNotifications(dropped);
@@ -1078,6 +1092,7 @@ void setup() {
                 return bleErr(id, -32013, "Feature not ready", serr, nullptr);
             }
             bleNotifyOwner = cid;
+            bleNotifyOwnerGen = mcpServer.clientGeneration(cid);
             JsonDocument doc;
             doc["jsonrpc"] = "2.0";
             doc["id"] = id;

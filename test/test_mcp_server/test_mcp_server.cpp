@@ -481,6 +481,18 @@ void test_tool_without_handler_is_hidden() {
     TEST_ASSERT_EQUAL(0, (int)r["result"]["tools"].as<JsonArray>().size());
 }
 
+void test_client_generation_changes_on_slot_reuse() {
+    server->setCredentials(secCreds());
+    TEST_ASSERT_EQUAL_UINT32(0, server->clientGeneration(1));
+    server->admitClient(1, "Bearer full-0123456789abcdef", "/");
+    uint32_t first = server->clientGeneration(1);
+    TEST_ASSERT_TRUE(first != 0);
+    server->removeClient(1);
+    TEST_ASSERT_EQUAL_UINT32(0, server->clientGeneration(1));
+    server->admitClient(1, "Bearer read-0123456789abcdef", "/");
+    TEST_ASSERT_TRUE(server->clientGeneration(1) != first);
+}
+
 int runUnityTests() {
     UNITY_BEGIN();
     
@@ -513,6 +525,7 @@ int runUnityTests() {
     RUN_TEST(test_tools_call_unknown_tool);
     RUN_TEST(test_tools_inherit_method_authorization);
     RUN_TEST(test_tool_without_handler_is_hidden);
+    RUN_TEST(test_client_generation_changes_on_slot_reuse);
     
     return UNITY_END();
 }

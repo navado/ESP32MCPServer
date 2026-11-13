@@ -158,6 +158,8 @@ MCPServer::Admission MCPServer::admitClient(uint8_t clientId,
     ClientState st;
     st.access  = access;
     st.limiter = auth::RateLimiter(rateCapacity_, ratePerSec_);
+    if (++nextGeneration_ == 0) ++nextGeneration_;  // 0 means "no client"
+    st.generation = nextGeneration_;
     clients_[clientId] = st;
     return Admission::Accepted;
 }
