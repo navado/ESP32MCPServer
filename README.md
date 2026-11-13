@@ -413,6 +413,7 @@ MCP Inspector: `npx @modelcontextprotocol/inspector`, then choose transport *Str
 | `metrics_list`, `metrics_get`, `metrics_history`, `logs_clear` | `metrics/*`, `logs/clear` |
 | `ble_scan`, `ble_scan_poll`, `ble_scan_results`, `ble_scan_payloads`, `ble_scan_stop` | `ble/scan*` (BLE boards only) |
 | `ble_connect`, `ble_connect_results`, `ble_services_start`, `ble_services_results`, `ble_services_stop`, `ble_disconnect` | `ble/connect*`, `ble/services/*`, `ble/disconnect` |
+| `ble_write`, `ble_subscribe`, `ble_unsubscribe`, `ble_notifications` | `ble/write`, `ble/subscribe`, `ble/unsubscribe`, `ble/notifications` |
 
 The JSON-RPC methods below remain callable directly.
 
@@ -678,10 +679,12 @@ The ESP32-S3 acts as a **BLE central** controlled over MCP: it captures what nea
 | **Capture filters** | `minRssi`, `manufacturerId`, `serviceUuid`, `macPrefix` decide what is stored, so the device of interest is not crowded out in a busy RF environment |
 | **Connect** | Asynchronous GATT connect with an enforced timeout; public, random static and resolvable private addresses (address type taken from the scan, or given explicitly); repeatable connect / disconnect / reconnect |
 | **Enumerate & read** | All primary/secondary services and characteristics with properties (up to 512 attributes); every readable value read (hex + printable text, first 64 bytes) |
-| **Notifications** | Subscribes to notify/indicate characteristics and captures the latest value within a bounded window (≤ 10 s) |
+| **Notifications** | During enumeration: subscribes to every notify/indicate characteristic and captures the latest value within a bounded window (≤ 10 s) |
+| **Write** | `ble/write` writes a characteristic (with or without response, up to 512 bytes), addressed by handle or UUID. Needs the full-control token |
+| **Subscribe** | `ble/subscribe` enables notifications or indications on one characteristic for as long as needed (up to 8 at once). Values are pushed to WebSocket clients as `notifications/ble/value`; HTTP clients read them with `ble/notifications` (32-value queue, oldest dropped and counted) |
 | **Memory-aware limits** | Capture limits follow the boot-time memory plan: 64 devices / 48 KB with PSRAM, 24 devices / 16 KB without; least-recently-heard devices are evicted first |
 
-**Not supported (yet):** writing characteristics, pairing/bonding (encrypted characteristics will fail to read), more than one connection at a time, BLE 5 extended advertising and Coded PHY (only legacy advertising is received), and acting as a peripheral/advertiser.
+**Not supported (yet):** descriptor writes other than the CCCD; pairing/bonding (encrypted characteristics fail to read or write); more than one connection at a time; MTU negotiation (stored values are truncated to 64 bytes; writes are not); BLE 5 extended advertising and Coded PHY (only legacy advertising is received); and acting as a peripheral/advertiser.
 
 **Verified on hardware** (ESP32-S3-DevKitC-1 N16R8) against an nRF52840 peripheral (random static address), an Android phone (rotating random address) and a BlueZ peripheral (public address): connect median 0.43 s (15/15), 47 connect/disconnect cycles with clean teardown on the peer, full enumeration of a phone (7 services / 37 characteristics) with ≥ 49 KB internal heap free throughout.
 
@@ -698,6 +701,10 @@ The ESP32-S3 acts as a **BLE central** controlled over MCP: it captures what nea
 | `ble/services/start` | — | Enumerate services/characteristics (background task); returns immediately |
 | `ble/services/results` | `notifyCaptureMs?` | Wait for enumeration + notified values (default 3000 ms, capped at 10000 ms) |
 | `ble/services/stop` | — | Unsubscribe from notifications and close the link |
+| `ble/write` | `handle` or `uuid`, `value` (hex), `withResponse?` (default true), `timeoutMs?` (≤ 5000) | Write a characteristic and wait for the write response. `handle` comes from `ble/services/results`; a `uuid` found in several services returns `-32602` with the candidate `handles`. The characteristic must have the `write` (or, without response, `write-no-response`) property. Not connected or not enumerated yet: `-32013`; another write in flight: `-32010`; GATT failure: `-32000` with `gattStatus` |
+| `ble/subscribe` | `handle` or `uuid`, `indicate?` | Enable notifications (default when supported) or indications. Result says `delivery: "push"` (WebSocket) or `"poll"` (HTTP) |
+| `ble/unsubscribe` | `handle` or `uuid` | Disable them again |
+| `ble/notifications` | — | Values notified since the last call: `{values:[{handle, uuid, valueHex, valueText, ts}], dropped, subscriptions, connected}` |
 
 #### `ble/scan` / `ble/scan/results`
 
@@ -764,7 +771,7 @@ Notes for reverse engineering:
   "jsonrpc":"2.0","id":19,
   "result":{"connected":true,"services":[
     {"uuid":"00001800-0000-1000-8000-00805f9b34fb","characteristics":[
-      {"uuid":"00002a00-0000-1000-8000-00805f9b34fb","properties":"read",
+      {"handle":3,"uuid":"00002a00-0000-1000-8000-00805f9b34fb","properties":"read",
        "valueHex":"4c452d4844203335304254","valueText":"LE-HD 350BT"}
     ]}
   ]}
@@ -773,9 +780,22 @@ Notes for reverse engineering:
 
 GATT enumeration runs in the background so a slow or uncooperative peer cannot block the MCP server.  Every operation is time-bounded: the open handshake (`timeoutMs`), service discovery (10 s cap), characteristic reads (5 s for the whole read phase), and the notified-value capture window (`notifyCaptureMs`, default 3000 ms, capped at 10000 ms because the call blocks the MCP task while it waits).  `ble/services/stop` (or `ble/disconnect`) closes the link, tearing down any in-flight work safely.
 
-### TypeScript client example
+### Client libraries and examples
 
-See [`examples/client/client.ts`](examples/client/client.ts) for a complete typed client.
+| File | What |
+|---|---|
+| [`examples/client/client.ts`](examples/client/client.ts) | Typed WebSocket client: `request()`, tools, and BLE helpers: `bleScanAndCollect`, `bleDevices`, `blePayloads`, `bleConnect` (waits for the link), `bleEnumerate`, `bleWrite`, `bleSubscribe(target, onValue)`, `bleNotifications`, `bleDisconnect`. Errors are `MCPError` with the server's `code` and `data` |
+| [`examples/client/ble_example.ts`](examples/client/ble_example.ts) | Scan → connect → enumerate → subscribe walk-through (`npx tsx ble_example.ts [mac]`) |
+| [`examples/client/mcp_ble.py`](examples/client/mcp_ble.py) | Dependency-free Python client over Streamable HTTP, with a CLI: `scan`, `enumerate <mac>`, `write <mac> <handle> <hex>`, `watch <mac> <handle>`, `tools` |
+
+Example GATT write and subscription with the Python CLI:
+
+```bash
+export MCP_URL=http://192.168.1.50 MCP_TOKEN=<token>
+python3 examples/client/mcp_ble.py enumerate aa:bb:cc:dd:ee:ff --addr-type random
+python3 examples/client/mcp_ble.py write aa:bb:cc:dd:ee:ff 32 01ff --addr-type random
+python3 examples/client/mcp_ble.py watch aa:bb:cc:dd:ee:ff 34 --seconds 10 --addr-type random
+```
 
 ---
 

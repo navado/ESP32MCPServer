@@ -110,6 +110,12 @@ public:
     // so a new client must not inherit the previous occupant's subscriptions.
     void removeClient(uint8_t clientId);
 
+    // Send a server-initiated message (notification) to one client.  Returns
+    // false when the client cannot receive pushes (HTTP session, unknown).
+    bool sendToClient(uint8_t clientId, const std::string& msg);
+    // Is `clientId` currently admitted (connected and authenticated)?
+    bool hasClient(uint8_t clientId) const { return clients_.count(clientId) > 0; }
+
     // Override the transport used for push notifications.
     void setSendFunc(SendFunc fn) { sendFunc_ = fn; }
 

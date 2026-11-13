@@ -451,6 +451,9 @@ std::vector<BLEServiceInfo> BLEScanner::getServicesStart() {
     pendingReads_.clear();
     notifyHandles_.clear();
     notifyValues_.clear();
+    // A fresh enumeration subscribes to everything notifiable; on-demand
+    // subscriptions (and their handles) are re-established by the client.
+    liveSubs_.clear();
     unlock();
 
     ensureGattTask();
@@ -769,6 +772,26 @@ void BLEScanner::onGattcEvent(esp_gattc_cb_event_t event, esp_gatt_if_t gattcIf,
             std::string hex = hexEncode(reinterpret_cast<const uint8_t*>(val.data()),
                                         val.length());
             notifyValues_[param->notify.handle] = hex;
+            auto live = liveSubs_.find(param->notify.handle);
+            if (live != liveSubs_.end()) {
+                gattops::NotifyEvent ev;
+                ev.handle      = param->notify.handle;
+                ev.uuid        = live->second;
+                ev.valueHex    = hex;
+                ev.timestampMs = millis();
+                notifyQueue_.push(std::move(ev));
+            }
+            unlock();
+            break;
+        }
+        case ESP_GATTC_WRITE_CHAR_EVT: {
+            lock();
+            if (gattcIf == gattcIf_ && param->write.conn_id == connId_ &&
+                writeState_ == WriteState::Pending && param->write.handle == writeHandle_) {
+                writeStatus_ = param->write.status;
+                writeState_  = param->write.status == ESP_GATT_OK ? WriteState::Ok
+                                                                  : WriteState::Failed;
+            }
             unlock();
             break;
         }
@@ -777,6 +800,11 @@ void BLEScanner::onGattcEvent(esp_gattc_cb_event_t event, esp_gatt_if_t gattcIf,
             if (gattcIf == gattcIf_ &&
                 (connId_ == 0 || param->disconnect.conn_id == connId_)) {
                 gattState_ = GattState::Idle;
+                liveSubs_.clear();
+                if (writeState_ == WriteState::Pending) {
+                    writeState_  = WriteState::Failed;
+                    writeStatus_ = ESP_GATT_ERROR;  // link dropped mid-write
+                }
                 connected_ = false;
                 hasPeer_ = false;
                 connId_ = 0;
@@ -788,6 +816,11 @@ void BLEScanner::onGattcEvent(esp_gattc_cb_event_t event, esp_gatt_if_t gattcIf,
             lock();
             if (gattcIf == gattcIf_ && param->close.conn_id == connId_) {
                 gattState_ = GattState::Idle;
+                liveSubs_.clear();
+                if (writeState_ == WriteState::Pending) {
+                    writeState_  = WriteState::Failed;
+                    writeStatus_ = ESP_GATT_ERROR;  // link dropped mid-write
+                }
                 connected_ = false;
                 hasPeer_ = false;
                 connId_ = 0;
@@ -889,6 +922,7 @@ void BLEScanner::gattLoadServices() {
                 continue;
             }
             BLECharInfo ci;
+            ci.handle = ch.attribute_handle;
             ci.uuid = gattcore::uuidToString(rawUuidOf(ch.uuid));
             ci.properties = gattcore::propertiesString(ch.properties);
             si.characteristics.push_back(ci);
@@ -1029,6 +1063,161 @@ void BLEScanner::gattUnsubscribeAll() {
     lock();
     notifyHandles_.clear();
     unlock();
+}
+
+// ---------------------------------------------------------------------------
+// On-demand GATT operations (issue #14)
+//
+// Issued from the caller's task (the MCP task) strictly outside the mutex;
+// esp_ble_gattc_* calls only post a message to the Bluedroid task.
+// ---------------------------------------------------------------------------
+
+std::vector<BLEServiceInfo> BLEScanner::getServices() const {
+    lock();
+    std::vector<BLEServiceInfo> out = services_;
+    unlock();
+    return out;
+}
+
+bool BLEScanner::writeStart(uint16_t handle, const std::vector<uint8_t>& value,
+                            bool withResponse, std::string& err) {
+    lock();
+    if (gattState_ != GattState::Connected || loadPending_) {
+        err = connected_ ? "enumeration in progress" : "not connected";
+        unlock();
+        return false;
+    }
+    if (writeState_ == WriteState::Pending) {
+        err = "a write is already in progress";
+        unlock();
+        return false;
+    }
+    esp_gatt_if_t gif = gattcIf_;
+    uint16_t cid = connId_;
+    writeHandle_ = handle;
+    writeStatus_ = 0;
+    writeState_  = withResponse ? WriteState::Pending : WriteState::Ok;
+    unlock();
+
+    std::vector<uint8_t> buf(value);  // the API takes a non-const pointer
+    esp_err_t rc = esp_ble_gattc_write_char(
+        gif, cid, handle, static_cast<uint16_t>(buf.size()), buf.data(),
+        withResponse ? ESP_GATT_WRITE_TYPE_RSP : ESP_GATT_WRITE_TYPE_NO_RSP,
+        ESP_GATT_AUTH_REQ_NONE);
+    if (rc != ESP_OK) {
+        lock();
+        writeState_  = WriteState::Failed;
+        writeStatus_ = rc;
+        unlock();
+        err = "controller rejected the write";
+        return false;
+    }
+    return true;
+}
+
+BLEScanner::WriteState BLEScanner::getWriteResult(int& gattStatus) const {
+    lock();
+    WriteState st = writeState_;
+    gattStatus = writeStatus_;
+    unlock();
+    return st;
+}
+
+bool BLEScanner::writeCcc(uint16_t handle, uint16_t value) {
+    lock();
+    esp_gatt_if_t gif = gattcIf_;
+    uint16_t cid = connId_;
+    unlock();
+    esp_bt_uuid_t cccdUuid;
+    cccdUuid.len = ESP_UUID_LEN_16;
+    cccdUuid.uuid.uuid16 = 0x2902;
+    esp_gattc_descr_elem_t descr;
+    uint16_t n = 1;
+    if (esp_ble_gattc_get_descr_by_char_handle(gif, cid, handle, cccdUuid, &descr, &n) !=
+            ESP_OK || n == 0) {
+        return false;
+    }
+    uint8_t val[2] = {static_cast<uint8_t>(value & 0xFF), static_cast<uint8_t>(value >> 8)};
+    return esp_ble_gattc_write_char_descr(gif, cid, descr.handle, sizeof(val), val,
+                                          ESP_GATT_WRITE_TYPE_RSP,
+                                          ESP_GATT_AUTH_REQ_NONE) == ESP_OK;
+}
+
+bool BLEScanner::subscribe(uint16_t handle, const std::string& uuid, bool indicate,
+                           std::string& err) {
+    lock();
+    if (gattState_ != GattState::Connected || loadPending_) {
+        err = connected_ ? "enumeration in progress" : "not connected";
+        unlock();
+        return false;
+    }
+    if (liveSubs_.find(handle) == liveSubs_.end() &&
+        liveSubs_.size() >= gattops::MAX_LIVE_SUBSCRIPTIONS) {
+        err = "too many subscriptions";
+        unlock();
+        return false;
+    }
+    esp_gatt_if_t gif = gattcIf_;
+    esp_bd_addr_t peer;
+    memcpy(peer, peerAddr_, 6);
+    // Accept NOTIFY_EVT for this handle and queue its values.
+    notifyHandles_[handle] = uuid;
+    liveSubs_[handle] = uuid;
+    unlock();
+
+    // Route notifications for this handle to our app, then enable them on
+    // the peer.  A registration failure (Bluedroid caps registrations) is
+    // not fatal: the CCCD write is what makes the peer send.
+    esp_ble_gattc_register_for_notify(gif, peer, handle);
+    if (!writeCcc(handle, gattops::cccdValue(true, indicate))) {
+        lock();
+        liveSubs_.erase(handle);
+        unlock();
+        err = "characteristic has no CCCD descriptor";
+        return false;
+    }
+    return true;
+}
+
+bool BLEScanner::unsubscribe(uint16_t handle, std::string& err) {
+    lock();
+    bool known = liveSubs_.erase(handle) > 0;
+    bool linkUp = gattState_ == GattState::Connected;
+    esp_gatt_if_t gif = gattcIf_;
+    esp_bd_addr_t peer;
+    memcpy(peer, peerAddr_, 6);
+    unlock();
+    if (!known) {
+        err = "not subscribed";
+        return false;
+    }
+    if (linkUp) {
+        writeCcc(handle, gattops::cccdValue(false, false));
+        esp_ble_gattc_unregister_for_notify(gif, peer, handle);
+    }
+    return true;
+}
+
+std::vector<uint16_t> BLEScanner::liveSubscriptions() const {
+    lock();
+    std::vector<uint16_t> out;
+    for (const auto& kv : liveSubs_) out.push_back(kv.first);
+    unlock();
+    return out;
+}
+
+std::vector<gattops::NotifyEvent> BLEScanner::drainNotifications(uint32_t& dropped) {
+    lock();
+    auto out = notifyQueue_.drain(dropped);
+    unlock();
+    return out;
+}
+
+bool BLEScanner::hasNotifications() const {
+    lock();
+    bool any = notifyQueue_.size() > 0;
+    unlock();
+    return any;
 }
 
 } // namespace mcp

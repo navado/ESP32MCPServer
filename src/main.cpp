@@ -277,6 +277,35 @@ static void handleSerialCommand(const String& line) {
     Serial.printf("Unknown command '%s' (type 'help')\n", cmd.c_str());
 }
 
+#if BOARD_HAS_BLE
+// Client that subscribed to BLE notifications (issue #14).  Values are
+// pushed to it as notifications/ble/value when it is a WebSocket client;
+// otherwise (HTTP session, disconnected) they wait for ble/notifications.
+static int bleNotifyOwner = -1;
+
+static void pushBleNotifications() {
+    if (bleNotifyOwner < 0 || bleNotifyOwner >= mcp::MCP_HTTP_CLIENT_BASE) return;
+    if (!mcpServer.hasClient(static_cast<uint8_t>(bleNotifyOwner))) return;
+    if (!bleScanner.hasNotifications()) return;
+    uint32_t dropped = 0;
+    auto events = bleScanner.drainNotifications(dropped);
+    for (const auto& ev : events) {
+        JsonDocument doc;
+        doc["jsonrpc"] = "2.0";
+        doc["method"]  = "notifications/ble/value";
+        JsonObject p = doc["params"].to<JsonObject>();
+        p["handle"]    = ev.handle;
+        p["uuid"]      = ev.uuid;
+        p["valueHex"]  = ev.valueHex;
+        p["valueText"] = mcp::blecore::hexToAscii(ev.valueHex);
+        p["ts"]        = ev.timestampMs;
+        if (dropped) { p["dropped"] = dropped; dropped = 0; }
+        std::string out; serializeJson(doc, out);
+        mcpServer.sendToClient(static_cast<uint8_t>(bleNotifyOwner), out);
+    }
+}
+#endif
+
 // Task handles
 TaskHandle_t mcpTaskHandle = nullptr;
 
@@ -285,6 +314,9 @@ void mcpTask(void* parameter) {
     while (true) {
         mcpServer.handleClient();
         mcpHttp.pump();
+#if BOARD_HAS_BLE
+        pushBleNotifications();
+#endif
         discoveryManager.update();
         vTaskDelay(pdMS_TO_TICKS(10));
     }
@@ -307,6 +339,7 @@ static std::string buildServicesResponse(uint32_t id,
         JsonArray chrArr = so["characteristics"].to<JsonArray>();
         for (const auto& chr : svc.characteristics) {
             JsonObject co = chrArr.add<JsonObject>();
+            co["handle"]     = chr.handle;
             co["uuid"]       = chr.uuid;
             co["properties"] = chr.properties;
             if (!chr.valueHex.empty())  co["valueHex"] = chr.valueHex;
@@ -912,6 +945,189 @@ void setup() {
             doc["jsonrpc"] = "2.0";
             doc["id"] = id;
             doc["result"]["ok"] = true;
+            std::string out; serializeJson(doc, out); return out;
+        });
+
+    // --- GATT write / subscribe (issue #14) --------------------------------
+    // Errors use the structured shapes of #15: -32013 not ready, -32010 busy.
+    auto bleErr = [](uint32_t id, int code, const char* message, const std::string& reason,
+                     const char* resolve) -> std::string {
+        JsonDocument doc;
+        doc["jsonrpc"] = "2.0";
+        doc["id"] = id;
+        doc["error"]["code"] = code;
+        doc["error"]["message"] = message;
+        JsonObject data = doc["error"]["data"].to<JsonObject>();
+        data["feature"] = "ble.central.gatt";
+        data["reason"]  = reason;
+        if (resolve) data["resolve"] = resolve;
+        std::string out; serializeJson(doc, out); return out;
+    };
+    auto invalidParams = [](uint32_t id, const std::string& msg) -> std::string {
+        JsonDocument doc;
+        doc["jsonrpc"] = "2.0";
+        doc["id"] = id;
+        doc["error"]["code"] = -32602;
+        doc["error"]["message"] = "Invalid params: " + msg;
+        std::string out; serializeJson(doc, out); return out;
+    };
+    // Resolve params.handle | params.uuid against the last enumeration.
+    // Returns "" and fills `ref`, or an error response.
+    auto resolveChar = [invalidParams, bleErr](uint32_t id, const JsonObject& p,
+                                               mcp::gattops::CharRef& ref) -> std::string {
+        if (!bleScanner.isConnected())
+            return bleErr(id, -32013, "Feature not ready", "not connected", "ble/connect");
+        uint16_t handle = p["handle"] | 0u;
+        std::string uuid = p["uuid"] | "";
+        if (handle == 0 && uuid.empty()) return invalidParams(id, "handle or uuid required");
+        auto services = bleScanner.getServices();
+        if (services.empty())
+            return bleErr(id, -32013, "Feature not ready", "services not enumerated",
+                          "ble/services/start");
+        std::vector<uint16_t> candidates;
+        auto r = mcp::gattops::resolveCharacteristic(services, handle, uuid, ref, candidates);
+        if (r == mcp::gattops::Resolve::NotFound)
+            return invalidParams(id, "no such characteristic on the connected device");
+        if (r == mcp::gattops::Resolve::Ambiguous) {
+            JsonDocument doc;
+            doc["jsonrpc"] = "2.0";
+            doc["id"] = id;
+            doc["error"]["code"] = -32602;
+            doc["error"]["message"] = "Invalid params: uuid matches several characteristics; pass handle";
+            JsonArray c = doc["error"]["data"]["handles"].to<JsonArray>();
+            for (uint16_t h : candidates) c.add(h);
+            std::string out; serializeJson(doc, out); return out;
+        }
+        return std::string();
+    };
+
+    // ble/write — write a characteristic value; waits for the write response.
+    mcpServer.registerMethodHandler("ble/write",
+        [resolveChar, invalidParams, bleErr](uint8_t, uint32_t id, const JsonObject& p) -> std::string {
+            mcp::gattops::CharRef ref;
+            std::string e = resolveChar(id, p, ref);
+            if (!e.empty()) return e;
+            std::vector<uint8_t> value;
+            std::string perr;
+            if (!mcp::gattops::parseHexBytes(p["value"] | "", value, perr))
+                return invalidParams(id, "value: " + perr);
+            bool withResponse = p["withResponse"] | true;
+            const char* need = withResponse ? "write" : "write-no-response";
+            if (!mcp::gattops::hasProperty(ref.properties, need)) {
+                JsonDocument doc;
+                doc["jsonrpc"] = "2.0";
+                doc["id"] = id;
+                doc["error"]["code"] = -32602;
+                doc["error"]["message"] = std::string("Invalid params: characteristic does not support ") + need;
+                doc["error"]["data"]["properties"] = ref.properties;
+                std::string out; serializeJson(doc, out); return out;
+            }
+            std::string werr;
+            if (!bleScanner.writeStart(ref.handle, value, withResponse, werr)) {
+                if (werr == "a write is already in progress")
+                    return bleErr(id, -32010, "Feature busy", werr, nullptr);
+                return bleErr(id, -32013, "Feature not ready", werr, nullptr);
+            }
+            uint32_t timeoutMs = p["timeoutMs"] | 2000u;
+            if (timeoutMs > 5000) timeoutMs = 5000;  // blocks the MCP task
+            int status = 0;
+            auto st = bleScanner.getWriteResult(status);
+            for (uint32_t waited = 0;
+                 st == mcp::BLEScanner::WriteState::Pending && waited < timeoutMs; waited += 20) {
+                delay(20);
+                st = bleScanner.getWriteResult(status);
+            }
+            JsonDocument doc;
+            doc["jsonrpc"] = "2.0";
+            doc["id"] = id;
+            if (st == mcp::BLEScanner::WriteState::Ok) {
+                doc["result"]["ok"]           = true;
+                doc["result"]["handle"]       = ref.handle;
+                doc["result"]["uuid"]         = ref.uuid;
+                doc["result"]["bytes"]        = value.size();
+                doc["result"]["withResponse"] = withResponse;
+            } else {
+                doc["error"]["code"] = -32000;
+                doc["error"]["message"] = st == mcp::BLEScanner::WriteState::Pending
+                                              ? "GATT write timed out" : "GATT write failed";
+                doc["error"]["data"]["handle"] = ref.handle;
+                if (status) doc["error"]["data"]["gattStatus"] = status;
+            }
+            std::string out; serializeJson(doc, out); return out;
+        });
+
+    // ble/subscribe — enable notifications (or indications) on one
+    // characteristic.  Values are pushed to this client as
+    // notifications/ble/value (WebSocket) or collected with ble/notifications.
+    mcpServer.registerMethodHandler("ble/subscribe",
+        [resolveChar, invalidParams, bleErr](uint8_t cid, uint32_t id, const JsonObject& p) -> std::string {
+            mcp::gattops::CharRef ref;
+            std::string e = resolveChar(id, p, ref);
+            if (!e.empty()) return e;
+            bool canNotify   = mcp::gattops::hasProperty(ref.properties, "notify");
+            bool canIndicate = mcp::gattops::hasProperty(ref.properties, "indicate");
+            if (!canNotify && !canIndicate)
+                return invalidParams(id, "characteristic supports neither notify nor indicate");
+            bool indicate = p["indicate"].is<bool>() ? p["indicate"].as<bool>() : !canNotify;
+            if (indicate && !canIndicate) return invalidParams(id, "characteristic does not support indicate");
+            if (!indicate && !canNotify) return invalidParams(id, "characteristic does not support notify");
+            std::string serr;
+            if (!bleScanner.subscribe(ref.handle, ref.uuid, indicate, serr)) {
+                if (serr == "too many subscriptions")
+                    return bleErr(id, -32012, "Resource limit", serr, "ble/unsubscribe");
+                return bleErr(id, -32013, "Feature not ready", serr, nullptr);
+            }
+            bleNotifyOwner = cid;
+            JsonDocument doc;
+            doc["jsonrpc"] = "2.0";
+            doc["id"] = id;
+            doc["result"]["subscribed"] = true;
+            doc["result"]["handle"]     = ref.handle;
+            doc["result"]["uuid"]       = ref.uuid;
+            doc["result"]["mode"]       = indicate ? "indicate" : "notify";
+            doc["result"]["delivery"]   = cid < mcp::MCP_HTTP_CLIENT_BASE
+                                              ? "push" : "poll";
+            std::string out; serializeJson(doc, out); return out;
+        });
+
+    mcpServer.registerMethodHandler("ble/unsubscribe",
+        [resolveChar, bleErr](uint8_t, uint32_t id, const JsonObject& p) -> std::string {
+            mcp::gattops::CharRef ref;
+            std::string e = resolveChar(id, p, ref);
+            if (!e.empty()) return e;
+            std::string uerr;
+            if (!bleScanner.unsubscribe(ref.handle, uerr))
+                return bleErr(id, -32013, "Feature not ready", uerr, nullptr);
+            JsonDocument doc;
+            doc["jsonrpc"] = "2.0";
+            doc["id"] = id;
+            doc["result"]["subscribed"] = false;
+            doc["result"]["handle"]     = ref.handle;
+            std::string out; serializeJson(doc, out); return out;
+        });
+
+    // ble/notifications — values notified since the last call (for clients
+    // that cannot receive pushes, e.g. Streamable HTTP sessions).
+    mcpServer.registerMethodHandler("ble/notifications",
+        [](uint8_t, uint32_t id, const JsonObject&) -> std::string {
+            uint32_t dropped = 0;
+            auto events = bleScanner.drainNotifications(dropped);
+            JsonDocument doc;
+            doc["jsonrpc"] = "2.0";
+            doc["id"] = id;
+            doc["result"]["connected"] = bleScanner.isConnected();
+            doc["result"]["dropped"]   = dropped;
+            JsonArray subs = doc["result"]["subscriptions"].to<JsonArray>();
+            for (uint16_t h : bleScanner.liveSubscriptions()) subs.add(h);
+            JsonArray arr = doc["result"]["values"].to<JsonArray>();
+            for (const auto& ev : events) {
+                JsonObject o = arr.add<JsonObject>();
+                o["handle"]    = ev.handle;
+                o["uuid"]      = ev.uuid;
+                o["valueHex"]  = ev.valueHex;
+                o["valueText"] = mcp::blecore::hexToAscii(ev.valueHex);
+                o["ts"]        = ev.timestampMs;
+            }
             std::string out; serializeJson(doc, out); return out;
         });
 #endif // BOARD_HAS_BLE
