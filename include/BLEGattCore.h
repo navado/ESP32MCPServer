@@ -28,6 +28,19 @@ inline bool gattStateConnected(GattState s) {
            s == GattState::Reading || s == GattState::NotifyWait;
 }
 
+// Stable lower-case name for status reports (system/features, error data).
+inline const char* gattStateName(GattState s) {
+    switch (s) {
+        case GattState::Connecting:  return "connecting";
+        case GattState::Connected:   return "connected";
+        case GattState::Discovering: return "discovering";
+        case GattState::Reading:     return "reading";
+        case GattState::NotifyWait:  return "notify-wait";
+        case GattState::Closing:     return "closing";
+        default:                     return "idle";
+    }
+}
+
 // True while an enumeration started by ble/services/start is still running.
 // `Connected` alone means the enumeration is FINISHED (or never started), so
 // it must not count as busy; it is busy only while a completed discovery is

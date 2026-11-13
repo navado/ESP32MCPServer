@@ -1,5 +1,6 @@
 #include "MCPServer.h"
 #include "MCPTypes.h"
+#include "FeatureModel.h"
 #include <ArduinoJson.h>
 #include <new>
 
@@ -91,6 +92,12 @@ void MCPServer::unregisterMethodHandler(const std::string& method) {
     methodHandlers_.erase(method);
 }
 
+void MCPServer::registerUnavailableNamespace(const std::string& prefix,
+                                             const std::string& feature,
+                                             const std::string& reason) {
+    unavailable_.push_back({prefix, feature, reason});
+}
+
 // ---------------------------------------------------------------------------
 // Message processing (JSON-RPC 2.0)
 // ---------------------------------------------------------------------------
@@ -154,6 +161,12 @@ std::string MCPServer::dispatch(uint8_t clientId, const std::string& method,
             return makeError(id, -32603, "Internal error: out of memory");
         } catch (...) {
             return makeError(id, -32603, "Internal error");
+        }
+    }
+
+    for (const auto& ns : unavailable_) {
+        if (method.compare(0, ns.prefix.size(), ns.prefix) == 0) {
+            return features::unavailableError(id, ns.feature, ns.reason);
         }
     }
 
@@ -263,6 +276,7 @@ void MCPServer::removeClient(uint8_t clientId) {
             ++it;
         }
     }
+    if (clientRemovedHook_) clientRemovedHook_(clientId);
 }
 
 // ---------------------------------------------------------------------------

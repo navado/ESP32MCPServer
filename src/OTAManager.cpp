@@ -172,11 +172,15 @@ void OTAManager::handleUpdateUpload(AsyncWebServerRequest* request,
             Serial.printf("[OTA] begin() failed: %s\n", lastErrorMsg_.c_str());
             return;
         }
+        lastChunkMs_ = millis();
+        updating_    = true;
     }
 
     if (uploadError_) return;   // skip remaining chunks after an error
+    lastChunkMs_ = millis();
 
     if (Update.write(data, len) != len) {
+        updating_     = false;
         uploadError_  = true;
         lastErrorMsg_ = Update.errorString();
         Serial.printf("[OTA] write() failed: %s\n", lastErrorMsg_.c_str());
@@ -184,6 +188,7 @@ void OTAManager::handleUpdateUpload(AsyncWebServerRequest* request,
     }
 
     if (final) {
+        updating_   = false;
         uploadDone_ = true;
         if (!Update.end(true)) {
             uploadError_  = true;
@@ -193,6 +198,11 @@ void OTAManager::handleUpdateUpload(AsyncWebServerRequest* request,
             Serial.println("[OTA] Upload complete — awaiting reboot.");
         }
     }
+}
+
+bool OTAManager::isUpdating() const {
+    if (!updating_) return false;
+    return (uint32_t)(millis() - lastChunkMs_) < UPLOAD_STALL_MS;
 }
 
 // ---------------------------------------------------------------------------

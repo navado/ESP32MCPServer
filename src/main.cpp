@@ -12,6 +12,7 @@
 #include "OTAManager.h"
 #include "BLEScanner.h"
 #include "MemoryPlan.h"
+#include "FeatureModel.h"
 
 #ifndef BOARD_BUS_HISTORY_HEAP_CAP
 #define BOARD_BUS_HISTORY_HEAP_CAP 0
@@ -125,14 +126,60 @@ OTAManager        otaManager;
 mcp::BLEScanner   bleScanner;
 #endif
 
+// Feature/state model (issue #15) and the boot-time memory plan it reports.
+mcp::features::FeatureRegistry featureRegistry;
+mcp::mem::MemoryPlan           memoryPlan;
+static const char* const FEATURES_URI = "device://features";
+
+#if !BOARD_HAS_BLE
+static const char* const BLE_UNAVAILABLE_REASON =
+    "not built for this board: on 4 MB flash the BLE stack cannot fit alongside "
+    "the WebSocket server and OTA";
+#endif
+
 // Task handles
 TaskHandle_t mcpTaskHandle = nullptr;
 
 // MCP task function — also drives the periodic UDP broadcast.
+static void fillFeatures(JsonObject root) {
+    featureRegistry.toJson(root);
+    JsonObject mp = root["memoryPlan"].to<JsonObject>();
+    mp["mode"]              = mcp::mem::modeName(memoryPlan.mode);
+    mp["busHistoryInPsram"] = memoryPlan.busHistoryInPsram;
+    mp["busHistoryCap"]     = memoryPlan.busHistoryCap;
+    mp["bleMaxDevices"]     = memoryPlan.bleMaxDevices;
+    mp["bleCaptureBytes"]   = memoryPlan.bleCaptureBytes;
+    root["board"] = BOARD_NAME;
+}
+
+static std::string featuresJson() {
+    JsonDocument doc;
+    fillFeatures(doc.to<JsonObject>());
+    std::string out; serializeJson(doc, out); return out;
+}
+
+// Re-publish device://features when any feature changes state, so subscribed
+// clients get notifications/resources/updated (polled: BLE and OTA state
+// change on their own tasks).
+static void refreshFeaturesResource(bool force = false) {
+    static std::string last;
+    std::string now = featuresJson();
+    if (!force && now == last) return;
+    last = now;
+    mcpServer.registerResource(mcp::MCPResource(
+        "Device features", FEATURES_URI, "application/json", now));
+    if (!force) mcpServer.broadcastResourceUpdate(FEATURES_URI);
+}
+
 void mcpTask(void* parameter) {
+    uint32_t lastFeatureCheck = 0;
     while (true) {
         mcpServer.handleClient();
         discoveryManager.update();
+        if (millis() - lastFeatureCheck >= 500) {
+            lastFeatureCheck = millis();
+            refreshFeaturesResource();
+        }
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
@@ -182,6 +229,7 @@ void setup() {
         const mcp::mem::MemoryPlan plan = mcp::mem::planMemory(
             psramFound(), static_cast<uint32_t>(ESP.getFreePsram()),
             BOARD_HAS_BLE != 0, BOARD_BUS_HISTORY_HEAP_CAP);
+        memoryPlan = plan;
         mcp::BusHistory::setMemoryPolicy(plan.busHistoryInPsram, plan.busHistoryCap);
 #if BOARD_HAS_BLE
         bleScanner.setCaptureLimits(plan.bleMaxDevices, plan.bleCaptureBytes);
@@ -443,6 +491,114 @@ void setup() {
             std::string out; serializeJson(doc, out); return out;
         });
 
+    // --- Feature / state model (issue #15) ---
+    // Every feature that can be blocked, compiled out or owned by a client is
+    // declared here; handlers ask featureRegistry.checkStart() before starting
+    // work and answer refusals with structured errors (-32010..-32013).
+    {
+        using namespace mcp::features;
+        Feature ota;
+        ota.id = "ota";
+        ota.conflictsWith = {"ble.central.scan", "ble.central.gatt", "ble.peripheral"};
+        ota.status = []() {
+            Status st;
+            st.active = otaManager.isUpdating();
+            if (st.active) st.detail = "flashing";
+            return st;
+        };
+        featureRegistry.add(ota);
+
+        Feature scan;
+        scan.id = "ble.central.scan";
+        scan.resolve = "ble/scan/stop";
+#if BOARD_HAS_BLE
+        scan.status = []() {
+            Status st;
+            st.active = bleScanner.isScanning();
+            if (!st.active) return st;
+            st.detail = "scanning";
+            uint32_t dur = bleScanner.getScanDurationMs();
+            uint64_t startAt = bleScanner.getScanStartedAt();
+            if (dur != 0 && startAt != 0) {
+                uint64_t elapsed = millis() - startAt;
+                st.retryAfterMs = elapsed >= dur ? 0u : (uint32_t)(dur - elapsed);
+            }
+            return st;
+        };
+        scan.release = []() { bleScanner.stopScan(); };
+#else
+        scan.available = false;
+        scan.unavailableReason = BLE_UNAVAILABLE_REASON;
+#endif
+        featureRegistry.add(scan);
+
+        Feature gatt;
+        gatt.id = "ble.central.gatt";
+        gatt.resolve = "ble/disconnect";
+#if BOARD_HAS_BLE
+        gatt.status = []() {
+            Status st;
+            auto gs = bleScanner.getGattState();
+            st.active = gs != mcp::gattcore::GattState::Idle;
+            if (st.active) st.detail = mcp::gattcore::gattStateName(gs);
+            return st;
+        };
+        gatt.release = []() { bleScanner.disconnect(); };
+#else
+        gatt.available = false;
+        gatt.unavailableReason = BLE_UNAVAILABLE_REASON;
+#endif
+        featureRegistry.add(gatt);
+
+        // Declared so clients can see the planned policy; exclusive with the
+        // central role until a time-sliced design is measured (see #15).
+        Feature periph;
+        periph.id = "ble.peripheral";
+        periph.available = false;
+        periph.unavailableReason = "not implemented";
+        periph.conflictsWith = {"ble.central.scan", "ble.central.gatt"};
+        featureRegistry.add(periph);
+
+        Feature i2c;
+        i2c.id = "sensors.i2c";
+        featureRegistry.add(i2c);
+
+        Feature can;
+        can.id = "bus.can";
+#if !BOARD_HAS_CAN
+        can.available = false;
+        can.unavailableReason = "no CAN controller on this board";
+#endif
+        featureRegistry.add(can);
+    }
+
+    // A disconnecting client releases what it started (stops its scan, drops
+    // its GATT link) so a vanished client cannot hold the radio.
+    mcpServer.setClientRemovedHook([](uint8_t cid) {
+        auto released = featureRegistry.releaseClient(cid);
+        for (const auto& f : released) {
+            Serial.printf("[features] client#%u disconnected: released %s\n",
+                          (unsigned)cid, f.c_str());
+        }
+    });
+
+    // system/features — availability, state, owner and conflicts of every
+    // feature, plus the active memory plan.  Also published as the
+    // device://features resource (subscribe for change notifications).
+    mcpServer.registerMethodHandler("system/features",
+        [](uint8_t, uint32_t id, const JsonObject&) -> std::string {
+            JsonDocument doc;
+            doc["jsonrpc"] = "2.0";
+            doc["id"] = id;
+            fillFeatures(doc["result"].to<JsonObject>());
+            std::string out; serializeJson(doc, out); return out;
+        });
+    refreshFeaturesResource(true);
+
+#if !BOARD_HAS_BLE
+    mcpServer.registerUnavailableNamespace("ble/", "ble.central", BLE_UNAVAILABLE_REASON);
+#endif
+
     // --- BLE scanning / GATT enumeration ---
     // (BLE stack initialised at the top of setup() so it allocates before the
     // bus-history ring buffers fragment the heap.)
@@ -452,7 +608,11 @@ void setup() {
     // until ble/scan/stop.  When a scan is already running the call reports
     // started:false with the remaining time so clients can tell the two apart.
     mcpServer.registerMethodHandler("ble/scan",
-        [](uint8_t, uint32_t id, const JsonObject& p) -> std::string {
+        [](uint8_t cid, uint32_t id, const JsonObject& p) -> std::string {
+            // Already scanning, or blocked by OTA: structured -32010 naming
+            // the blocker, its remaining time and how to clear it.
+            auto decision = featureRegistry.checkStart("ble.central.scan");
+            if (!decision.ok()) return mcp::features::decisionError(id, decision);
             uint32_t durationMs = p["durationMs"] | 5000u;
             // Optional capture filter: decides which devices are STORED (the
             // ble/scan/results filters only shape the response).
@@ -465,28 +625,25 @@ void setup() {
                 filter.serviceUuid = mcp::blecore::toLowerCopy(p["serviceUuid"].as<const char*>());
             if (p["macPrefix"].is<const char*>())
                 filter.macPrefix = mcp::blecore::toLowerCopy(p["macPrefix"].as<const char*>());
-            bool started = bleScanner.startScan(durationMs, filter);
+            if (!bleScanner.startScan(durationMs, filter)) {
+                // Lost a race with another start: report the live blocker.
+                decision = featureRegistry.checkStart("ble.central.scan");
+                if (!decision.ok()) return mcp::features::decisionError(id, decision);
+                return mcp::features::notReadyError(id, "ble.central.scan",
+                                                    "scanner failed to start", "");
+            }
+            featureRegistry.setOwner("ble.central.scan", cid);
             JsonDocument doc;
             doc["jsonrpc"] = "2.0";
             doc["id"] = id;
-            doc["result"]["started"] = started;
+            doc["result"]["started"] = true;
             doc["result"]["scanning"] = bleScanner.isScanning();
-            if (started && filter.active()) {
+            if (filter.active()) {
                 JsonObject cap = doc["result"]["capture"].to<JsonObject>();
                 if (filter.minRssi > -128) cap["minRssi"] = filter.minRssi;
                 if (!filter.manufacturerPrefix.empty()) cap["manufacturerId"] = filter.manufacturerPrefix;
                 if (!filter.serviceUuid.empty()) cap["serviceUuid"] = filter.serviceUuid;
                 if (!filter.macPrefix.empty()) cap["macPrefix"] = filter.macPrefix;
-            }
-            if (!started) {
-                uint32_t dur = bleScanner.getScanDurationMs();
-                uint64_t startAt = bleScanner.getScanStartedAt();
-                if (dur == 0 || startAt == 0) {
-                    doc["result"]["remainingMs"] = 0;
-                } else {
-                    uint64_t elapsed = millis() - startAt;
-                    doc["result"]["remainingMs"] = elapsed >= dur ? 0u : dur - elapsed;
-                }
             }
             std::string out; serializeJson(doc, out); return out;
         });
@@ -660,7 +817,7 @@ void setup() {
     // attempt completes in the background within `timeoutMs`; poll the result
     // via ble/connect/results.
     mcpServer.registerMethodHandler("ble/connect",
-        [](uint8_t, uint32_t id, const JsonObject& p) -> std::string {
+        [](uint8_t cid, uint32_t id, const JsonObject& p) -> std::string {
             std::string mac;
             if (p["mac"].is<const char*>()) mac = p["mac"].as<const char*>();
             uint32_t timeoutMs = p["timeoutMs"] | 5000u;
@@ -678,25 +835,38 @@ void setup() {
                 }
                 addrType = t;
             }
-            if (mac.empty()) {
+            unsigned oct[6];
+            char trailing;
+            if (mac.empty() ||
+                sscanf(mac.c_str(), "%x:%x:%x:%x:%x:%x%c", &oct[0], &oct[1], &oct[2],
+                       &oct[3], &oct[4], &oct[5], &trailing) != 6) {
                 JsonDocument doc;
                 doc["jsonrpc"] = "2.0";
                 doc["id"]      = id;
                 doc["error"]["code"]    = -32602;
-                doc["error"]["message"] = "Invalid params: mac required";
+                doc["error"]["message"] =
+                    "Invalid params: mac required as aa:bb:cc:dd:ee:ff";
                 std::string out; serializeJson(doc, out); return out;
             }
-            bool started = bleScanner.connect(mac, timeoutMs, addrType);
+            // Already connecting/connected/enumerating/closing, or blocked by
+            // OTA: structured -32010 with the GATT state and resolve method.
+            auto decision = featureRegistry.checkStart("ble.central.gatt");
+            if (!decision.ok()) return mcp::features::decisionError(id, decision);
+            if (!bleScanner.connect(mac, timeoutMs, addrType)) {
+                decision = featureRegistry.checkStart("ble.central.gatt");
+                if (!decision.ok()) return mcp::features::decisionError(id, decision);
+                return mcp::features::notReadyError(id, "ble.central.gatt",
+                                                    "connect could not be started", "");
+            }
+            featureRegistry.setOwner("ble.central.gatt", cid);
             JsonDocument doc;
             doc["jsonrpc"] = "2.0";
             doc["id"] = id;
-            doc["result"]["started"]    = started;
-            doc["result"]["connecting"] = started && bleScanner.isConnecting();
+            doc["result"]["started"]    = true;
+            doc["result"]["connecting"] = bleScanner.isConnecting();
             doc["result"]["connected"]  = bleScanner.isConnected();
-            if (started) {
-                doc["result"]["addrType"] =
-                    mcp::blecore::addrTypeName(bleScanner.getPeerAddrType());
-            }
+            doc["result"]["addrType"] =
+                mcp::blecore::addrTypeName(bleScanner.getPeerAddrType());
             std::string out; serializeJson(doc, out); return out;
         });
 
@@ -727,6 +897,28 @@ void setup() {
     // Returns immediately; notified values arrive via ble/services/results.
     mcpServer.registerMethodHandler("ble/services/start",
         [](uint8_t, uint32_t id, const JsonObject&) -> std::string {
+            using namespace mcp::features;
+            // Blocked by a conflicting feature (OTA)?
+            Decision d = featureRegistry.checkStart("ble.central.gatt");
+            if (!d.ok() && d.blockedBy != "ble.central.gatt") return decisionError(id, d);
+            auto gs = bleScanner.getGattState();
+            if (gs == mcp::gattcore::GattState::Idle)
+                return notReadyError(id, "ble.central.gatt", "not connected", "ble/connect");
+            if (gs == mcp::gattcore::GattState::Connecting)
+                return notReadyError(id, "ble.central.gatt", "connect in progress",
+                                     "ble/connect/results");
+            if (gs == mcp::gattcore::GattState::Closing)
+                return notReadyError(id, "ble.central.gatt", "link closing", "ble/connect");
+            if (bleScanner.isEnumerating()) {
+                Decision busy;
+                busy.kind      = Decision::Kind::Busy;
+                busy.feature   = "ble.central.gatt";
+                busy.blockedBy = "ble.central.gatt";
+                busy.state     = mcp::gattcore::gattStateName(gs);
+                busy.owner     = featureRegistry.owner("ble.central.gatt");
+                busy.resolve   = "ble/services/results";
+                return busyError(id, busy);
+            }
             auto services = bleScanner.getServicesStart();
             return buildServicesResponse(id, services, bleScanner.isConnected());
         });
