@@ -101,7 +101,9 @@ private:
     static uint32_t sourceKey(AsyncWebServerRequest* request);
 
     // Per-source-IP lockout: a host that keeps guessing locks out only itself.
-    mutable mcp::auth::LockoutTable lockouts_{8, 5, 30000, 300000};
+    // 32 sources (~1 KB): an attacker needs more than 32 concurrently failing
+    // LAN addresses before untracked hosts share the overflow lockout.
+    mutable mcp::auth::LockoutTable lockouts_{32, 5, 30000, 300000};
     static String generatePassword();
 
     // HTTP handler helpers.
