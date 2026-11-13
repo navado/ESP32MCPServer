@@ -103,7 +103,10 @@ private:
 
 // One FailureLockout per source (e.g. client IPv4 address), so a host that
 // keeps failing locks out only itself.  Bounded: at most `capacity` sources
-// are tracked; the least recently used unlocked entry is evicted first.
+// are tracked.  Entries are never evicted while they could matter (only
+// once unlocked and quiet for longer than maxMs); when the table is full,
+// all untracked sources share one overflow lockout, so an attacker cannot
+// gain guesses by rotating through more addresses than the table holds.
 class LockoutTable {
 public:
     LockoutTable(size_t capacity = 8, uint32_t threshold = 5, uint32_t baseMs = 30000,
@@ -121,9 +124,11 @@ private:
         uint32_t       lastMs;
     };
     Entry* find(uint32_t key);
+    void   purgeStale(uint32_t nowMs);
     size_t   capacity_;
     uint32_t threshold_, baseMs_, maxMs_;
     std::vector<Entry> entries_;
+    FailureLockout     overflow_;
 };
 
 // `bytes` random bytes from `rnd` rendered as lower-case hex (2*bytes chars).

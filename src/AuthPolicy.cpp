@@ -198,41 +198,44 @@ void FailureLockout::recordSuccess() {
 LockoutTable::LockoutTable(size_t capacity, uint32_t threshold, uint32_t baseMs,
                            uint32_t maxMs)
     : capacity_(capacity ? capacity : 1), threshold_(threshold), baseMs_(baseMs),
-      maxMs_(maxMs) {}
+      maxMs_(maxMs), overflow_(threshold, baseMs, maxMs) {}
 
 LockoutTable::Entry* LockoutTable::find(uint32_t key) {
     for (auto& e : entries_) if (e.key == key) return &e;
     return nullptr;
 }
 
+void LockoutTable::purgeStale(uint32_t nowMs) {
+    // An entry is forgotten only once it is unlocked AND has been quiet for
+    // longer than the maximum lockout, so failure counts cannot be shed by
+    // making the table evict them.
+    for (auto it = entries_.begin(); it != entries_.end();) {
+        if (!it->lockout.locked(nowMs) && (uint32_t)(nowMs - it->lastMs) > maxMs_)
+            it = entries_.erase(it);
+        else
+            ++it;
+    }
+}
+
 bool LockoutTable::locked(uint32_t key, uint32_t nowMs) {
     Entry* e = find(key);
-    return e && e->lockout.locked(nowMs);
+    return e ? e->lockout.locked(nowMs) : overflow_.locked(nowMs);
 }
 
 uint32_t LockoutTable::retryAfterMs(uint32_t key, uint32_t nowMs) {
     Entry* e = find(key);
-    return e ? e->lockout.retryAfterMs(nowMs) : 0;
+    return e ? e->lockout.retryAfterMs(nowMs) : overflow_.retryAfterMs(nowMs);
 }
 
 void LockoutTable::recordFailure(uint32_t key, uint32_t nowMs) {
     Entry* e = find(key);
     if (!e) {
+        purgeStale(nowMs);
         if (entries_.size() >= capacity_) {
-            // Evict the least recently used entry, preferring unlocked ones so
-            // a flood of new sources cannot cheaply free a locked-out one.
-            size_t victim = entries_.size();
-            for (size_t i = 0; i < entries_.size(); ++i) {
-                if (entries_[i].lockout.locked(nowMs)) continue;
-                if (victim == entries_.size() || entries_[i].lastMs < entries_[victim].lastMs)
-                    victim = i;
-            }
-            if (victim == entries_.size()) {
-                victim = 0;
-                for (size_t i = 1; i < entries_.size(); ++i)
-                    if (entries_[i].lastMs < entries_[victim].lastMs) victim = i;
-            }
-            entries_.erase(entries_.begin() + victim);
+            // Table full of recently failing sources: everyone else shares one
+            // lockout, so rotating source addresses does not buy more guesses.
+            overflow_.recordFailure(nowMs);
+            return;
         }
         entries_.push_back(Entry{key, FailureLockout(threshold_, baseMs_, maxMs_), nowMs});
         e = &entries_.back();
@@ -245,6 +248,7 @@ void LockoutTable::recordSuccess(uint32_t key) {
     for (auto it = entries_.begin(); it != entries_.end(); ++it) {
         if (it->key == key) { entries_.erase(it); return; }
     }
+    overflow_.recordSuccess();
 }
 
 // ---------------------------------------------------------------------------

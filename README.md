@@ -314,7 +314,7 @@ Tokens can also be pre-provisioned in an NVS image, like the WiFi credentials.
 
 **OTA.**
 - There is no compiled-in default password. A random per-device password is generated on first boot, and also on a device that still holds the old `admin` default. It is printed once on the serial console.
-- After 5 consecutive wrong logins **from one IP address**, that address gets `429` (with `Retry-After`) for 30 s, doubling up to 5 minutes per further failure. Other hosts are not affected, so a guessing host can't lock the owner out. Up to 8 source addresses are tracked.
+- After 5 consecutive wrong logins **from one IP address**, that address gets `429` (with `Retry-After`) for 30 s, doubling up to 5 minutes per further failure. Other hosts are not affected, so a guessing host can't lock the owner out. Up to 8 source addresses are tracked. Beyond that, the remaining sources share one lockout, so rotating addresses doesn't buy extra guesses.
 
 **Not covered yet.**
 - **TLS (`wss://`).** The WebSocket library used here has no server-side TLS on ESP32. On the 4 MB boards there is no flash headroom for it at all. On the ESP32-S3 it needs a different server stack, which is planned with the Streamable HTTP transport (#13). Until then, use a trusted network, or a TLS-terminating proxy or VPN.

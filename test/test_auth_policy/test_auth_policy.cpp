@@ -202,22 +202,34 @@ void test_lockout_table_is_per_source(void) {
     TEST_ASSERT_FALSE(t.locked(0xA, 0));
 }
 
-void test_lockout_table_is_bounded_and_keeps_locked_entries(void) {
-    LockoutTable t(2, 1, 10000, 10000);
-    t.recordFailure(1, 0);            // locked
-    t.recordFailure(2, 10);           // locked
-    // Table full of locked entries: the oldest goes.
-    t.recordFailure(3, 20);
+void test_lockout_table_rotation_does_not_shed_failures(void) {
+    LockoutTable t(2, 3, 10000, 60000);
+    t.recordFailure(1, 0);
+    t.recordFailure(2, 0);           // table full, both with 1 failure
+    // An attacker rotating through further addresses shares one bucket ...
+    t.recordFailure(3, 1);
+    t.recordFailure(4, 2);
+    TEST_ASSERT_FALSE(t.locked(5, 2));
+    t.recordFailure(5, 3);
+    TEST_ASSERT_TRUE(t.locked(6, 3));   // ... which locks every untracked source
+    // ... and the tracked entries kept their counts (not evicted).
     TEST_ASSERT_EQUAL(2, (int)t.size());
-    TEST_ASSERT_FALSE(t.locked(1, 30));
-    TEST_ASSERT_TRUE(t.locked(2, 30));
-    TEST_ASSERT_TRUE(t.locked(3, 30));
+    t.recordFailure(1, 4);
+    t.recordFailure(1, 4);
+    TEST_ASSERT_TRUE(t.locked(1, 4));
+    TEST_ASSERT_FALSE(t.locked(2, 4));  // the other tracked host is unaffected
+}
 
-    LockoutTable u(2, 3, 10000, 10000);
-    u.recordFailure(1, 0); u.recordFailure(1, 0); u.recordFailure(1, 0);  // locked
-    u.recordFailure(2, 5);                                                // not locked
-    u.recordFailure(3, 10);   // evicts the unlocked entry 2, not the locked 1
-    TEST_ASSERT_TRUE(u.locked(1, 20));
+void test_lockout_table_forgets_quiet_entries(void) {
+    LockoutTable t(1, 3, 1000, 5000);
+    t.recordFailure(1, 0);
+    // After maxMs of quiet, a new source can take the slot.
+    t.recordFailure(2, 6000);
+    TEST_ASSERT_EQUAL(1, (int)t.size());
+    t.recordFailure(2, 6000);
+    t.recordFailure(2, 6000);
+    TEST_ASSERT_TRUE(t.locked(2, 6000));
+    TEST_ASSERT_FALSE(t.locked(1, 6000));  // untracked, overflow bucket clean
 }
 
 // --- token generation ---------------------------------------------------------------
@@ -254,7 +266,8 @@ int main(int, char**) {
     RUN_TEST(test_lockout_doubles_and_caps);
     RUN_TEST(test_lockout_success_resets);
     RUN_TEST(test_lockout_table_is_per_source);
-    RUN_TEST(test_lockout_table_is_bounded_and_keeps_locked_entries);
+    RUN_TEST(test_lockout_table_rotation_does_not_shed_failures);
+    RUN_TEST(test_lockout_table_forgets_quiet_entries);
     RUN_TEST(test_generate_token_hex);
     return UNITY_END();
 }
