@@ -19,8 +19,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     10/s (`-32021`); a heartbeat drops dead clients.
   - The dashboard and `examples/client/client.ts` take a token.
 - **OTA has no default password** — #12. A random per-device password is generated on
-  first boot (also replacing a stored `admin`). Repeated failed logins lock authentication
-  out with `429`.
+  first boot (also replacing a stored `admin`). Repeated failed logins from one IP lock
+  that IP out with `429`.
 
 ### Added
 - **Bluetooth LE over MCP (ESP32-S3)** — #9, #11

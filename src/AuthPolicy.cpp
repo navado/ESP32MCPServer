@@ -106,14 +106,17 @@ static const char* const kReadOnlyMethods[] = {
     "resources/list", "resources/read", "resources/subscribe", "resources/unsubscribe",
     "resources/templates/list",
     "system/features",
-    "sensors/i2c/scan", "sensors/read",
+    // sensors/i2c/scan is NOT here: re-probing writes init commands to the
+    // devices on the bus.
+    "sensors/read",
     "metrics/list", "metrics/get", "metrics/history",
     "logs/query",
     "bus/history/read", "bus/history/config/get",
-    // Passive radio observation.  Connecting to / talking to third-party
-    // devices (ble/connect, ble/services/*, ble/disconnect) needs full control.
-    "ble/scan", "ble/scan/results", "ble/scan/payloads", "ble/scan/poll", "ble/scan/stop",
-    "ble/connect/results",
+    // Only BLE calls that leave shared state alone.  ble/scan starts the
+    // shared scanner, ble/scan/stop, ble/scan/results and ble/scan/payloads
+    // stop it, and ble/connect, ble/services/*, ble/disconnect talk to
+    // third-party devices: all need full control.
+    "ble/scan/poll", "ble/connect/results",
 };
 
 bool methodAllowed(Access access, const std::string& method) {
@@ -186,6 +189,62 @@ void FailureLockout::recordFailure(uint32_t nowMs) {
 void FailureLockout::recordSuccess() {
     failures_   = 0;
     lockActive_ = false;
+}
+
+// ---------------------------------------------------------------------------
+// LockoutTable
+// ---------------------------------------------------------------------------
+
+LockoutTable::LockoutTable(size_t capacity, uint32_t threshold, uint32_t baseMs,
+                           uint32_t maxMs)
+    : capacity_(capacity ? capacity : 1), threshold_(threshold), baseMs_(baseMs),
+      maxMs_(maxMs) {}
+
+LockoutTable::Entry* LockoutTable::find(uint32_t key) {
+    for (auto& e : entries_) if (e.key == key) return &e;
+    return nullptr;
+}
+
+bool LockoutTable::locked(uint32_t key, uint32_t nowMs) {
+    Entry* e = find(key);
+    return e && e->lockout.locked(nowMs);
+}
+
+uint32_t LockoutTable::retryAfterMs(uint32_t key, uint32_t nowMs) {
+    Entry* e = find(key);
+    return e ? e->lockout.retryAfterMs(nowMs) : 0;
+}
+
+void LockoutTable::recordFailure(uint32_t key, uint32_t nowMs) {
+    Entry* e = find(key);
+    if (!e) {
+        if (entries_.size() >= capacity_) {
+            // Evict the least recently used entry, preferring unlocked ones so
+            // a flood of new sources cannot cheaply free a locked-out one.
+            size_t victim = entries_.size();
+            for (size_t i = 0; i < entries_.size(); ++i) {
+                if (entries_[i].lockout.locked(nowMs)) continue;
+                if (victim == entries_.size() || entries_[i].lastMs < entries_[victim].lastMs)
+                    victim = i;
+            }
+            if (victim == entries_.size()) {
+                victim = 0;
+                for (size_t i = 1; i < entries_.size(); ++i)
+                    if (entries_[i].lastMs < entries_[victim].lastMs) victim = i;
+            }
+            entries_.erase(entries_.begin() + victim);
+        }
+        entries_.push_back(Entry{key, FailureLockout(threshold_, baseMs_, maxMs_), nowMs});
+        e = &entries_.back();
+    }
+    e->lastMs = nowMs;
+    e->lockout.recordFailure(nowMs);
+}
+
+void LockoutTable::recordSuccess(uint32_t key) {
+    for (auto it = entries_.begin(); it != entries_.end(); ++it) {
+        if (it->key == key) { entries_.erase(it); return; }
+    }
 }
 
 // ---------------------------------------------------------------------------

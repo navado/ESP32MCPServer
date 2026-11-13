@@ -10,6 +10,7 @@
 //   * access levels: a FULL-control token and an optional READ-ONLY token;
 //   * per-method authorization (read-only clients get a whitelist, everything
 //     else — including methods added later — needs full control);
+//   * per-source failed-login lockout (LockoutTable);
 //   * a per-client token-bucket request limiter;
 //   * a failed-login lockout with exponential backoff (OTA Basic Auth);
 //   * random token generation.
@@ -18,6 +19,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 
 namespace mcp {
 namespace auth {
@@ -97,6 +99,31 @@ private:
     uint32_t failures_ = 0;
     uint32_t lockedUntil_ = 0;
     bool     lockActive_ = false;
+};
+
+// One FailureLockout per source (e.g. client IPv4 address), so a host that
+// keeps failing locks out only itself.  Bounded: at most `capacity` sources
+// are tracked; the least recently used unlocked entry is evicted first.
+class LockoutTable {
+public:
+    LockoutTable(size_t capacity = 8, uint32_t threshold = 5, uint32_t baseMs = 30000,
+                 uint32_t maxMs = 300000);
+    bool     locked(uint32_t key, uint32_t nowMs);
+    uint32_t retryAfterMs(uint32_t key, uint32_t nowMs);
+    void     recordFailure(uint32_t key, uint32_t nowMs);
+    void     recordSuccess(uint32_t key);
+    size_t   size() const { return entries_.size(); }
+
+private:
+    struct Entry {
+        uint32_t       key;
+        FailureLockout lockout;
+        uint32_t       lastMs;
+    };
+    Entry* find(uint32_t key);
+    size_t   capacity_;
+    uint32_t threshold_, baseMs_, maxMs_;
+    std::vector<Entry> entries_;
 };
 
 // `bytes` random bytes from `rnd` rendered as lower-case hex (2*bytes chars).

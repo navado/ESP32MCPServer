@@ -52,8 +52,9 @@
 //   old "admin" default) a random per-device password is generated and
 //   printed once on the serial console.  `ota show` / `ota rotate` on the
 //   serial console display or replace it.
-//   Failed logins: after 5 consecutive bad credentials, every auth attempt is
-//   refused with 429 for 30 s, doubling per further failure up to 5 min.
+//   Failed logins: after 5 consecutive bad credentials from one IP, that IP's
+//   attempts are refused with 429 for 30 s, doubling per further failure up
+//   to 5 min.  Other hosts are unaffected.
 //
 // Usage:
 //   OTAManager otaManager;
@@ -92,12 +93,15 @@ private:
     bool        uploadDone_     = false;
 
     // Returns true when the request carries valid Basic Auth credentials and
-    // authentication is not locked out.  Counts failed attempts.
-    bool authenticate(AsyncWebServerRequest* request) const;
+    // its source IP is not locked out.  Wrong credentials count as a failure
+    // for that IP when `countFailure` (once per request, not per chunk).
+    bool authenticate(AsyncWebServerRequest* request, bool countFailure = true) const;
     // authenticate(), answering 429 (locked out) or 401 itself on failure.
     bool requireAuth(AsyncWebServerRequest* request) const;
+    static uint32_t sourceKey(AsyncWebServerRequest* request);
 
-    mutable mcp::auth::FailureLockout lockout_{5, 30000, 300000};
+    // Per-source-IP lockout: a host that keeps guessing locks out only itself.
+    mutable mcp::auth::LockoutTable lockouts_{8, 5, 30000, 300000};
     static String generatePassword();
 
     // HTTP handler helpers.

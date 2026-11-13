@@ -85,19 +85,27 @@ void OTAManager::registerRoutes(AsyncWebServer& server) {
 // Authentication
 // ---------------------------------------------------------------------------
 
-bool OTAManager::authenticate(AsyncWebServerRequest* request) const {
+uint32_t OTAManager::sourceKey(AsyncWebServerRequest* request) {
+    AsyncClient* c = request->client();
+    return c ? static_cast<uint32_t>(c->remoteIP()) : 0u;
+}
+
+bool OTAManager::authenticate(AsyncWebServerRequest* request, bool countFailure) const {
     const uint32_t now = millis();
-    if (lockout_.locked(now)) return false;
+    const uint32_t src = sourceKey(request);
+    if (lockouts_.locked(src, now)) return false;
     // A request without credentials is the normal first step of the browser
     // Basic Auth flow; only WRONG credentials count as failures.
     const bool hasCreds = request->hasHeader("Authorization");
     const bool ok = request->authenticate(OTA_USERNAME, password_.c_str());
-    if (ok)            lockout_.recordSuccess();
-    else if (hasCreds) {
-        lockout_.recordFailure(now);
-        if (lockout_.locked(now)) {
-            Serial.printf("[OTA] %u failed logins: auth locked for %u ms\n",
-                          (unsigned)lockout_.failures(), (unsigned)lockout_.retryAfterMs(now));
+    if (ok) {
+        lockouts_.recordSuccess(src);
+    } else if (hasCreds && countFailure) {
+        lockouts_.recordFailure(src, now);
+        if (lockouts_.locked(src, now)) {
+            Serial.printf("[OTA] repeated failed logins from %s: locked for %u ms\n",
+                          request->client() ? request->client()->remoteIP().toString().c_str() : "?",
+                          (unsigned)lockouts_.retryAfterMs(src, now));
         }
     }
     return ok;
@@ -106,10 +114,11 @@ bool OTAManager::authenticate(AsyncWebServerRequest* request) const {
 bool OTAManager::requireAuth(AsyncWebServerRequest* request) const {
     if (authenticate(request)) return true;
     const uint32_t now = millis();
-    if (lockout_.locked(now)) {
+    const uint32_t src = sourceKey(request);
+    if (lockouts_.locked(src, now)) {
         AsyncWebServerResponse* resp = request->beginResponse(
             429, "text/plain", "Too many failed logins; try again later");
-        resp->addHeader("Retry-After", String((lockout_.retryAfterMs(now) + 999) / 1000));
+        resp->addHeader("Retry-After", String((lockouts_.retryAfterMs(src, now) + 999) / 1000));
         request->send(resp);
         return false;
     }
@@ -205,8 +214,9 @@ void OTAManager::handleUpdateUpload(AsyncWebServerRequest* request,
                                     const String& /*filename*/,
                                     size_t index, uint8_t* data,
                                     size_t len, bool final) {
-    // Re-check auth on each chunk to prevent unauthenticated stream injection.
-    if (!authenticate(request)) return;
+    // Re-check auth on each chunk to prevent unauthenticated stream injection,
+    // but count a wrong password once per request, not once per chunk.
+    if (!authenticate(request, /*countFailure=*/index == 0)) return;
 
     if (index == 0) {
         uploadError_ = false;

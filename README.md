@@ -286,7 +286,7 @@ The device is meant for a **trusted LAN**. The MCP WebSocket is authenticated; t
 | Token | Key | Access |
 |---|---|---|
 | Full control | `token` | Every method |
-| Read-only (optional) | `ro_token` | Observation only: `initialize`, `resources/*`, `sensors/*`, `metrics/*`, `logs/query`, `bus/history/read`, `bus/history/config/get`, `ble/scan*`, `ble/connect/results`. `ble/connect`, `ble/services/*`, `ble/disconnect`, `logs/clear`, `bus/history/config/set` and any method not on the list need full control |
+| Read-only (optional) | `ro_token` | Observation only, nothing that changes shared state: `initialize`, `resources/*`, `sensors/read`, `metrics/*`, `logs/query`, `bus/history/read`, `bus/history/config/get`, `ble/scan/poll`, `ble/connect/results`. Starting or stopping the shared BLE scan (`ble/scan`, `ble/scan/stop`, `ble/scan/results`, `ble/scan/payloads`), `sensors/i2c/scan` (it writes init commands to devices), `ble/connect`, `ble/services/*`, `ble/disconnect`, `logs/clear`, `bus/history/config/set` and any method not on the list need full control |
 
 - On first boot with no token, a random 128-bit token is generated and printed once on the serial console.
 - Clients send it as `Authorization: Bearer <token>` or, from browsers (which cannot set WebSocket headers), as `?token=<token>`.
@@ -314,7 +314,7 @@ Tokens can also be pre-provisioned in an NVS image, like the WiFi credentials.
 
 **OTA.**
 - There is no compiled-in default password. A random per-device password is generated on first boot, and also on a device that still holds the old `admin` default. It is printed once on the serial console.
-- After 5 consecutive wrong logins, OTA authentication is refused with `429` (and `Retry-After`) for 30 s, doubling up to 5 minutes per further failure. The lockout is device-wide, so a host on the LAN can delay a legitimate update, but it cannot brute-force the password.
+- After 5 consecutive wrong logins **from one IP address**, that address gets `429` (with `Retry-After`) for 30 s, doubling up to 5 minutes per further failure. Other hosts are not affected, so a guessing host can't lock the owner out. Up to 8 source addresses are tracked.
 
 **Not covered yet.**
 - **TLS (`wss://`).** The WebSocket library used here has no server-side TLS on ESP32. On the 4 MB boards there is no flash headroom for it at all. On the ESP32-S3 it needs a different server stack, which is planned with the Streamable HTTP transport (#13). Until then, use a trusted network, or a TLS-terminating proxy or VPN.

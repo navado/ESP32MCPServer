@@ -102,7 +102,8 @@ void test_read_only_whitelist(void) {
     TEST_ASSERT_TRUE(methodAllowed(Access::ReadOnly, "resources/read"));
     TEST_ASSERT_TRUE(methodAllowed(Access::ReadOnly, "sensors/read"));
     TEST_ASSERT_TRUE(methodAllowed(Access::ReadOnly, "logs/query"));
-    TEST_ASSERT_TRUE(methodAllowed(Access::ReadOnly, "ble/scan"));
+    TEST_ASSERT_TRUE(methodAllowed(Access::ReadOnly, "ble/scan/poll"));
+    TEST_ASSERT_TRUE(methodAllowed(Access::ReadOnly, "ble/connect/results"));
     TEST_ASSERT_TRUE(methodAllowed(Access::ReadOnly, "bus/history/read"));
 }
 
@@ -112,6 +113,13 @@ void test_read_only_denies_state_changes(void) {
     TEST_ASSERT_FALSE(methodAllowed(Access::ReadOnly, "ble/services/start"));
     TEST_ASSERT_FALSE(methodAllowed(Access::ReadOnly, "ble/disconnect"));
     TEST_ASSERT_FALSE(methodAllowed(Access::ReadOnly, "bus/history/config/set"));
+    // These start or stop the shared BLE scanner.
+    TEST_ASSERT_FALSE(methodAllowed(Access::ReadOnly, "ble/scan"));
+    TEST_ASSERT_FALSE(methodAllowed(Access::ReadOnly, "ble/scan/stop"));
+    TEST_ASSERT_FALSE(methodAllowed(Access::ReadOnly, "ble/scan/results"));
+    TEST_ASSERT_FALSE(methodAllowed(Access::ReadOnly, "ble/scan/payloads"));
+    // Re-probing the I2C bus writes init commands to devices.
+    TEST_ASSERT_FALSE(methodAllowed(Access::ReadOnly, "sensors/i2c/scan"));
     // Deny by default: new methods need full control until whitelisted.
     TEST_ASSERT_FALSE(methodAllowed(Access::ReadOnly, "some/future/method"));
 }
@@ -181,6 +189,37 @@ void test_lockout_success_resets(void) {
     TEST_ASSERT_EQUAL_UINT32(1, lo.failures());
 }
 
+// --- per-source lockout table ---------------------------------------------------
+
+void test_lockout_table_is_per_source(void) {
+    LockoutTable t(4, 2, 1000, 8000);
+    t.recordFailure(0xA, 0);
+    t.recordFailure(0xA, 0);
+    TEST_ASSERT_TRUE(t.locked(0xA, 0));
+    // Another host is not affected by the attacker's lockout.
+    TEST_ASSERT_FALSE(t.locked(0xB, 0));
+    t.recordSuccess(0xA);
+    TEST_ASSERT_FALSE(t.locked(0xA, 0));
+}
+
+void test_lockout_table_is_bounded_and_keeps_locked_entries(void) {
+    LockoutTable t(2, 1, 10000, 10000);
+    t.recordFailure(1, 0);            // locked
+    t.recordFailure(2, 10);           // locked
+    // Table full of locked entries: the oldest goes.
+    t.recordFailure(3, 20);
+    TEST_ASSERT_EQUAL(2, (int)t.size());
+    TEST_ASSERT_FALSE(t.locked(1, 30));
+    TEST_ASSERT_TRUE(t.locked(2, 30));
+    TEST_ASSERT_TRUE(t.locked(3, 30));
+
+    LockoutTable u(2, 3, 10000, 10000);
+    u.recordFailure(1, 0); u.recordFailure(1, 0); u.recordFailure(1, 0);  // locked
+    u.recordFailure(2, 5);                                                // not locked
+    u.recordFailure(3, 10);   // evicts the unlocked entry 2, not the locked 1
+    TEST_ASSERT_TRUE(u.locked(1, 20));
+}
+
 // --- token generation ---------------------------------------------------------------
 
 void test_generate_token_hex(void) {
@@ -214,6 +253,8 @@ int main(int, char**) {
     RUN_TEST(test_lockout_after_threshold);
     RUN_TEST(test_lockout_doubles_and_caps);
     RUN_TEST(test_lockout_success_resets);
+    RUN_TEST(test_lockout_table_is_per_source);
+    RUN_TEST(test_lockout_table_is_bounded_and_keeps_locked_entries);
     RUN_TEST(test_generate_token_hex);
     return UNITY_END();
 }
