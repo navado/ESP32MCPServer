@@ -3,6 +3,7 @@
 #include <WiFi.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
+#include <functional>
 #include <Preferences.h>
 #include <LittleFS.h>
 #include "RequestQueue.h"
@@ -63,6 +64,9 @@ public:
     // Wire in an OTAManager so its /ota/* routes are registered on the server.
     // Call before begin().
     void setOTAManager(OTAManager* ota);
+    // Route registration hook for extra HTTP endpoints (e.g. the MCP
+    // Streamable HTTP transport at /mcp); called before the server starts.
+    void setRouteRegistrar(std::function<void(AsyncWebServer&)> fn) { routeRegistrar_ = std::move(fn); }
 #endif
 
     // Process one pending network request synchronously (used in tests
@@ -90,6 +94,7 @@ private:
     mcp::BusHistory*   busHistory_  = nullptr;
 #ifndef NATIVE_TEST
     OTAManager*        ota_         = nullptr;
+    std::function<void(AsyncWebServer&)> routeRegistrar_;
 #endif
 
     void setupWebServer();

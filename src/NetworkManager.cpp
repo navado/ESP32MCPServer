@@ -132,6 +132,7 @@ void NetworkManager::setupWebServer() {
     });
 
 #ifndef NATIVE_TEST
+    if (routeRegistrar_) routeRegistrar_(server);
     if (ota_) {
         ota_->registerRoutes(server);
     }
