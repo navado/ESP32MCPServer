@@ -28,6 +28,19 @@ inline bool gattStateConnected(GattState s) {
            s == GattState::Reading || s == GattState::NotifyWait;
 }
 
+// Stable lower-case name for status reports (system/features, error data).
+inline const char* gattStateName(GattState s) {
+    switch (s) {
+        case GattState::Connecting:  return "connecting";
+        case GattState::Connected:   return "connected";
+        case GattState::Discovering: return "discovering";
+        case GattState::Reading:     return "reading";
+        case GattState::NotifyWait:  return "notify-wait";
+        case GattState::Closing:     return "closing";
+        default:                     return "idle";
+    }
+}
+
 // Should a DISCONNECT_EVT / CLOSE_EVT tear down the current lifecycle?  Not
 // while Idle (nothing to tear down) or Connecting (no link opened yet: the
 // event belongs to the previous link, whose conn_id is often the same 0).

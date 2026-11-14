@@ -156,6 +156,10 @@ public:
 
     // True while the GATT connection has pending enumeration work.
     bool isServicesBusy() const;
+    // Current GATT client state (system/features, structured errors).
+    gattcore::GattState getGattState() const;
+    // True while an enumeration started by getServicesStart() is running.
+    bool isEnumerating() const;
 
     // --- GATT operations on the connected peer (issue #14) ----------------
     // All require an open link with no enumeration in progress (state

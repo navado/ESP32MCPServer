@@ -425,6 +425,7 @@ MCP Inspector: `npx @modelcontextprotocol/inspector`, then choose transport *Str
 | `sensors_scan`, `sensors_read` | `sensors/i2c/scan`, `sensors/read` |
 | `bus_history_read`, `bus_history_config_get`, `bus_history_config_set` | `bus/history/*` |
 | `metrics_list`, `metrics_get`, `metrics_history`, `logs_clear` | `metrics/*`, `logs/clear` |
+| `system_features` | `system/features` |
 | `ble_scan`, `ble_scan_poll`, `ble_scan_results`, `ble_scan_payloads`, `ble_scan_stop` | `ble/scan*` (BLE boards only) |
 | `ble_connect`, `ble_connect_results`, `ble_services_start`, `ble_services_results`, `ble_services_stop`, `ble_disconnect` | `ble/connect*`, `ble/services/*`, `ble/disconnect` |
 | `ble_write`, `ble_subscribe`, `ble_unsubscribe`, `ble_notifications` | `ble/write`, `ble/subscribe`, `ble/unsubscribe`, `ble/notifications` |
@@ -445,6 +446,7 @@ The JSON-RPC methods below remain callable directly.
 | `resources/read` | `uri` | Read a resource by URI |
 | `resources/subscribe` | `uri` | Subscribe to push updates for a resource |
 | `resources/unsubscribe` | `uri` | Cancel a subscription |
+| `system/features` | — | Feature availability, state, owner and conflicts, plus the active memory plan (see [Features and structured errors](#features-and-structured-errors)) |
 
 ### Sensors
 
@@ -677,11 +679,51 @@ After subscribing the server pushes unsolicited `notifications/resources/updated
 {"jsonrpc":"2.0","method":"notifications/resources/updated","params":{"uri":"sensor://i2c/bme280_0x76"}}
 ```
 
+### Features and structured errors
+
+Some features cannot run at the same time (for example BLE and an OTA flash), and some are not built for every board.  `system/features` reports the live state of each one; the same document is published as the resource `device://features`, so a client can `resources/subscribe` to it and get `notifications/resources/updated` whenever a feature changes state.
+
+OTA takes priority over BLE: an authenticated firmware upload stops a running scan and drops the GATT link, and BLE requests are refused with `-32010` (`blockedBy: "ota"`) until the upload ends.
+
+```json
+{"jsonrpc":"2.0","method":"system/features","id":30}
+```
+```json
+{"jsonrpc":"2.0","id":30,"result":{
+  "features":[
+    {"id":"ota","available":true,"state":"idle","conflictsWith":["ble.central.scan","ble.central.gatt","ble.peripheral"]},
+    {"id":"ble.central.scan","available":true,"state":"active","detail":"scanning","owner":"client#2","conflictsWith":["ota","ble.peripheral"]},
+    {"id":"ble.central.gatt","available":true,"state":"idle","conflictsWith":["ota","ble.peripheral"]},
+    {"id":"ble.peripheral","available":false,"reason":"not implemented","state":"idle","conflictsWith":["ota","ble.central.scan","ble.central.gatt"]},
+    {"id":"sensors.i2c","available":true,"state":"idle","conflictsWith":[]},
+    {"id":"bus.can","available":true,"state":"idle","conflictsWith":[]}
+  ],
+  "memoryPlan":{"mode":"psram","busHistoryInPsram":true,"busHistoryCap":1048576,"bleMaxDevices":64,"bleCaptureBytes":49152},
+  "board":"ESP32-S3-DevKitC-1"}}
+```
+
+`state` is `idle`, `active` (with a `detail` such as `scanning`, `connecting`, `connected`, `discovering` or `flashing`) or `blocked` (with `blockedBy`).  A feature started by a client is **owned** by it, and is released when that client disconnects: its scan is stopped and its GATT link dropped, so a vanished client cannot hold the radio.
+
+A request that cannot run gets a structured error instead of a bare `started:false`.  The codes are stable:
+
+| Code | Message | Meaning | `data` |
+|---|---|---|---|
+| `-32010` | Feature busy | The feature is already running, or a conflicting feature is | `feature`, `blockedBy`, `state`, `owner?`, `retryAfterMs`, `resolve?` (method that clears the blocker) |
+| `-32011` | Feature unavailable | Compiled out, no hardware, or not implemented. Used for every `ble/*` method on boards without BLE, instead of `-32601` | `feature`, `reason` |
+| `-32012` | Resource limit | Reserved: memory-plan or buffer caps reached | — |
+| `-32013` | Feature not ready | A precondition is missing (e.g. `ble/services/start` while not connected) | `feature`, `reason`, `resolve?` |
+
+```json
+{"jsonrpc":"2.0","id":14,"error":{"code":-32010,"message":"Feature busy",
+ "data":{"feature":"ble.central.scan","blockedBy":"ble.central.scan","state":"scanning",
+         "owner":"client#2","retryAfterMs":3400,"resolve":"ble/scan/stop"}}}
+```
+
 ### Bluetooth (BLE)
 
 The ESP32-S3 acts as a **BLE central** controlled over MCP: it captures what nearby devices broadcast (useful for reverse-engineering advertising formats) and can connect to a device to enumerate and read its GATT database.  Every call is **non-blocking or time-bounded**, so a slow or misbehaving peer can never hang the MCP server.
 
-**Supported boards:** `esp32-s3-devkitc-1` and `esp32-s3-devkitc-1-n16r8` (PSRAM).  On the 4 MB-flash boards the BLE stack cannot fit alongside the WebSocket server and OTA, so the `ble/*` methods are not compiled there; the nRF52 targets have no MCP server.
+**Supported boards:** `esp32-s3-devkitc-1` and `esp32-s3-devkitc-1-n16r8` (PSRAM).  On the 4 MB-flash boards the BLE stack cannot fit alongside the WebSocket server and OTA, so the `ble/*` methods are not compiled there and return `-32011 Feature unavailable`; the nRF52 targets have no MCP server.
 
 #### Capabilities
 
@@ -704,15 +746,15 @@ The ESP32-S3 acts as a **BLE central** controlled over MCP: it captures what nea
 
 | Method | Params | Description |
 |---|---|---|
-| `ble/scan` | `durationMs?`, `minRssi?`, `manufacturerId?`, `serviceUuid?`, `macPrefix?` | Start a scan (default 5000 ms; 0 = continuous until `ble/scan/stop`); returns immediately. If a scan is already running: `{started:false, scanning:true, remainingMs}`. The optional **capture filter** decides which devices are *stored* (AND-combined; `manufacturerId` is a hex prefix of the manufacturer data with the company id little-endian, e.g. `0xDEAD` → `"adde"`), so ambient traffic cannot crowd out the device of interest. Device count and capture size follow the boot-time memory plan (64 devices / 48 KB with PSRAM, 24 / 16 KB without); when full, the least-recently-heard device is evicted |
+| `ble/scan` | `durationMs?`, `minRssi?`, `manufacturerId?`, `serviceUuid?`, `macPrefix?` | Start a scan (default 5000 ms; 0 = continuous until `ble/scan/stop`); returns immediately. If a scan is already running, or an OTA update is in progress: `-32010 Feature busy` with `retryAfterMs` (time left on a timed scan) and `resolve: "ble/scan/stop"`. The optional **capture filter** decides which devices are *stored* (AND-combined; `manufacturerId` is a hex prefix of the manufacturer data with the company id little-endian, e.g. `0xDEAD` → `"adde"`), so ambient traffic cannot crowd out the device of interest. Device count and capture size follow the boot-time memory plan (64 devices / 48 KB with PSRAM, 24 / 16 KB without); when full, the least-recently-heard device is evicted |
 | `ble/scan/results` | `mac?`, `serviceUuid?`, `manufacturerId?`, `macPrefix?` | Stop the scan (if running) and return captured devices; optional case-insensitive `mac` returns only that device with its **full** payload history; optional AND-combined response filters (`serviceUuid`, `manufacturerId` hex, `macPrefix`) never affect capture. Also returns `evicted` (devices dropped this scan to stay within the limits), `maxDevices`, and per-device `lastSeen` |
 | `ble/scan/payloads` | — | Stop the scan and return the **MAC-independent payload registry**: distinct payloads across ALL broadcasters, first-seen order, with `count` + `firstSeen`/`lastSeen` (ms since scan start), plus `dropped`: distinct payloads discarded because the registry (64 entries) was full. The primary artifact for protocol reverse-engineering — survives per-MAC MAC-rotation churn |
 | `ble/scan/poll` | — | Live read of the payload registry WITHOUT stopping the scan (stateless; diff by `firstSeen`) |
 | `ble/scan/stop` | — | Stop a continuous scan early |
-| `ble/connect` | `mac`, `timeoutMs?`, `addrType?` | Begin an **asynchronous** GATT connect to a peer MAC (default timeout 5000 ms). `addrType` is `public`, `random`, `rpa-public` or `rpa-random`; when omitted, the type recorded by the last scan for that MAC is used (public if it was not seen). Most phones, watches and sensors use random addresses and cannot be opened as public |
+| `ble/connect` | `mac`, `timeoutMs?`, `addrType?` | Begin an **asynchronous** GATT connect to a peer MAC (default timeout 5000 ms). `addrType` is `public`, `random`, `rpa-public` or `rpa-random`; when omitted, the type recorded by the last scan for that MAC is used (public if it was not seen). Most phones, watches and sensors use random addresses and cannot be opened as public. A malformed `mac` is `-32602`; a link that is already connecting, connected, enumerating or closing (or an OTA in progress) is `-32010` with the GATT `state` and `resolve: "ble/disconnect"` |
 | `ble/connect/results` | — | Poll the outcome of the last async connect |
 | `ble/disconnect` | — | Drop the GATT link |
-| `ble/services/start` | — | Enumerate services/characteristics (background task); returns immediately |
+| `ble/services/start` | — | Enumerate services/characteristics (background task); returns immediately. Not connected (or still connecting / closing): `-32013 Feature not ready` with `resolve`; an enumeration already running: `-32010` with `resolve: "ble/services/results"` |
 | `ble/services/results` | `notifyCaptureMs?` | Wait for enumeration + notified values (default 3000 ms, capped at 10000 ms) |
 | `ble/services/stop` | — | Unsubscribe from notifications and close the link |
 | `ble/write` | `handle` or `uuid`, `value` (hex), `withResponse?` (default true), `timeoutMs?` (≤ 5000) | Write a characteristic and wait for the write response. `handle` comes from `ble/services/results`; a `uuid` found in several services returns `-32602` with the candidate `handles`. The characteristic must have the `write` (or, without response, `write-no-response`) property. Not connected or not enumerated yet: `-32013`; another write in flight: `-32010`; GATT failure: `-32000` with `gattStatus` |

@@ -144,7 +144,12 @@ class McpHttpClient:
         if addr_type:
             params["addrType"] = addr_type
         for attempt in range(attempts):
-            started = self.request("ble/connect", params)
+            try:
+                started = self.request("ble/connect", params)
+            except McpError as e:
+                if e.code != -32010:     # only "Feature busy" is worth a retry
+                    raise
+                started = {}
             if not started.get("started") and not started.get("connected"):
                 time.sleep(0.5)          # previous link still closing
                 continue

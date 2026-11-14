@@ -5,6 +5,8 @@
 #include <Arduino.h>
 #include <Preferences.h>
 #include <Update.h>
+#include <atomic>
+#include <functional>
 #include "AuthPolicy.h"
 #include <ESPAsyncWebServer.h>
 
@@ -85,12 +87,26 @@ public:
     // JSON representation of the last OTA attempt and firmware info.
     String getStatusJson() const;
 
+    // True while a firmware upload is being written to flash.  An upload whose
+    // client vanished mid-stream (no final chunk) stops counting after
+    // UPLOAD_STALL_MS without data.  Safe to call from any task.
+    bool isUpdating() const;
+    static constexpr uint32_t UPLOAD_STALL_MS = 30000;
+
+    // Called once when an authenticated upload starts, before anything is
+    // written, on the web server's task.  The firmware uses it to stop BLE
+    // activity, which competes with the flash write (issue #15).
+    void setUpdateStartHook(std::function<void()> hook) { updateStartHook_ = std::move(hook); }
+
 private:
     Preferences preferences_;
     String      password_;          // current OTA password (plaintext in NVS)
     bool        uploadError_    = false;
     String      lastErrorMsg_;
     bool        uploadDone_     = false;
+    std::atomic<bool>     updating_{false};
+    std::function<void()> updateStartHook_;
+    std::atomic<uint32_t> lastChunkMs_{0};
 
     // Returns true when the request carries valid Basic Auth credentials and
     // its source IP is not locked out.  Wrong credentials count as a failure
