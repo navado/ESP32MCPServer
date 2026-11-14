@@ -515,6 +515,33 @@ void test_parse_adv_fields_short_name_and_malformed(void) {
     TEST_ASSERT_TRUE(mcp::blecore::parseAdvFields(nullptr, 0).name.empty());
 }
 
+void test_parse_adv_fields_bounded(void) {
+    // 1650 bytes of 16-bit UUID lists + a 200-byte name + 200 bytes of mfg data
+    std::vector<uint8_t> d;
+    for (int blk = 0; blk < 6; ++blk) {
+        d.push_back(255); d.push_back(0x03);
+        for (int k = 0; k < 127; ++k) { d.push_back(static_cast<uint8_t>(k)); d.push_back(0x18); }
+    }
+    d.push_back(201); d.push_back(0x09); for (int k = 0; k < 200; ++k) d.push_back('n');
+    d.push_back(201); d.push_back(0xFF); for (int k = 0; k < 200; ++k) d.push_back(0xAB);
+    mcp::blecore::AdvFields f = mcp::blecore::parseAdvFields(d.data(), d.size());
+    TEST_ASSERT_EQUAL(MAX_ADV_NAME_CHARS, f.name.size());
+    TEST_ASSERT_EQUAL(MAX_MANUFACTURER_BYTES * 2, f.manufacturer.size());
+    size_t commas = 0;
+    for (char c : f.servicesHex) commas += c == ',';
+    TEST_ASSERT_EQUAL(MAX_ADV_SERVICES - 1, commas);
+    // clampAdvFields bounds fields from the legacy (Arduino) path too
+    mcp::blecore::AdvFields g;
+    g.name.assign(300, 'x');
+    g.manufacturer.assign(1000, 'a');
+    for (int k = 0; k < 20; ++k) g.servicesHex += (k ? "," : "") + std::string(36, 'u');
+    mcp::blecore::clampAdvFields(g);
+    TEST_ASSERT_EQUAL(MAX_ADV_NAME_CHARS, g.name.size());
+    TEST_ASSERT_EQUAL(MAX_MANUFACTURER_BYTES * 2, g.manufacturer.size());
+    TEST_ASSERT_TRUE(g.servicesHex.size() <= MAX_SERVICES_CHARS);
+    TEST_ASSERT_TRUE(g.servicesHex.back() == 'u');   // cut at a UUID boundary
+}
+
 void test_ext_report_event_type_bits(void) {
     TEST_ASSERT_TRUE(mcp::blecore::extReportIsLegacy(0x13));      // legacy ADV_IND
     TEST_ASSERT_TRUE(mcp::blecore::extReportConnectable(0x13));
@@ -574,6 +601,7 @@ int runUnityTests(void) {
     RUN_TEST(test_capture_filter_service_and_mac_prefix);
     RUN_TEST(test_parse_adv_fields_like_arduino);
     RUN_TEST(test_parse_adv_fields_short_name_and_malformed);
+    RUN_TEST(test_parse_adv_fields_bounded);
     RUN_TEST(test_ext_report_event_type_bits);
     return UNITY_END();
 }

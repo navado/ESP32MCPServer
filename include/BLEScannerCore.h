@@ -168,10 +168,28 @@ struct AdvFields {
     std::string servicesHex;
     std::string manufacturer;
 };
+// Bounds on the derived fields (extended advertising data can be 1650 bytes:
+// e.g. ~800 16-bit UUIDs would expand to ~30 KB of text per device).
+constexpr size_t MAX_ADV_NAME_CHARS     = 64;
+constexpr size_t MAX_ADV_SERVICES       = 8;
+constexpr size_t MAX_MANUFACTURER_BYTES = MAX_PAYLOAD_BYTES;
+constexpr size_t MAX_SERVICES_CHARS     = MAX_ADV_SERVICES * 37;
+// Clamp fields from either scanner to the bounds above.
+inline void clampAdvFields(AdvFields& f) {
+    if (f.name.size() > MAX_ADV_NAME_CHARS) f.name.resize(MAX_ADV_NAME_CHARS);
+    if (f.manufacturer.size() > MAX_MANUFACTURER_BYTES * 2) f.manufacturer.resize(MAX_MANUFACTURER_BYTES * 2);
+    if (f.servicesHex.size() > MAX_SERVICES_CHARS) {
+        size_t cut = f.servicesHex.rfind(',', MAX_SERVICES_CHARS);
+        f.servicesHex.resize(cut == std::string::npos ? 0 : cut);
+    }
+}
 inline AdvFields parseAdvFields(const uint8_t* d, size_t n) {
     static const char* const kHex = "0123456789abcdef";
     AdvFields f;
-    auto addService = [&f](const std::string& u) {
+    size_t services = 0;
+    auto addService = [&f, &services](const std::string& u) {
+        if (services >= MAX_ADV_SERVICES) return;
+        ++services;
         if (!f.servicesHex.empty()) f.servicesHex += ",";
         f.servicesHex += u;
     };
@@ -183,10 +201,12 @@ inline AdvFields parseAdvFields(const uint8_t* d, size_t n) {
         const uint8_t* v = d + i + 2;
         const size_t vlen = len - 1;
         if (type == 0x09 || (type == 0x08 && f.name.empty())) {
-            f.name.assign(reinterpret_cast<const char*>(v), vlen);
+            f.name.assign(reinterpret_cast<const char*>(v),
+                          vlen > MAX_ADV_NAME_CHARS ? MAX_ADV_NAME_CHARS : vlen);
         } else if (type == 0xFF) {
             f.manufacturer.clear();
-            for (size_t k = 0; k < vlen; ++k) {
+            const size_t m = vlen > MAX_MANUFACTURER_BYTES ? MAX_MANUFACTURER_BYTES : vlen;
+            for (size_t k = 0; k < m; ++k) {
                 f.manufacturer += kHex[v[k] >> 4];
                 f.manufacturer += kHex[v[k] & 0xF];
             }

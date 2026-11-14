@@ -347,13 +347,19 @@ void BLEScanner::onAdv(BLEAdvertisedDevice* adv) {
 }
 
 void BLEScanner::ingestAdv(const AdvInput& in) {
+    blecore::AdvFields fields = in.fields;
+    blecore::clampAdvFields(fields);   // both scanners: bounded derived fields
     lock();
     const std::string& mac = in.mac;
     std::string payloadHex;
-    if (in.raw != nullptr && in.rawLen > 0) payloadHex = hexEncode(in.raw, in.rawLen);
-    const std::string& name = in.fields.name;
-    const std::string& servicesHex = in.fields.servicesHex;
-    const std::string& manufacturer = in.fields.manufacturer;
+    if (in.raw != nullptr && in.rawLen > 0) {
+        // recordPayload() truncates to MAX_PAYLOAD_HEX; encode no more than that.
+        const size_t n = in.rawLen > blecore::MAX_PAYLOAD_BYTES ? blecore::MAX_PAYLOAD_BYTES : in.rawLen;
+        payloadHex = hexEncode(in.raw, n);
+    }
+    const std::string& name = fields.name;
+    const std::string& servicesHex = fields.servicesHex;
+    const std::string& manufacturer = fields.manufacturer;
 
     const uint64_t now = millis();
     const int rssi = in.rssi;
