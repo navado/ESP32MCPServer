@@ -41,6 +41,7 @@ SensorReading I2CSensorDriver::make(const std::string& param, double value,
 std::vector<uint8_t> knownI2CAddresses() {
     return {
         0x23, 0x5C,         // BH1750
+        0x38,               // AHT20
         0x40, 0x41, 0x42, 0x43, 0x44, 0x45, // INA219 (0x40..0x4F) + SHT31 (0x44,0x45)
         0x48, 0x49, 0x4A, 0x4B, // ADS1115
         0x68, 0x69,         // MPU6050
@@ -64,6 +65,8 @@ std::unique_ptr<I2CSensorDriver> createI2CDriver(I2CInterface& bus,
         return std::make_unique<INA219Driver>(bus, address);
     case 0x23: case 0x5C:
         return std::make_unique<BH1750Driver>(bus, address);
+    case 0x38:
+        return std::make_unique<AHT20Driver>(bus, address);
     default:
         return nullptr;
     }
@@ -327,13 +330,10 @@ std::vector<SensorReading> ADS1115Driver::read() {
 }
 
 // ---------------------------------------------------------------------------
-// SHT31
+// CRC-8, polynomial 0x31, init 0xFF — used by both SHT31 and AHT20
 // ---------------------------------------------------------------------------
 
-SHT31Driver::SHT31Driver(I2CInterface& bus, uint8_t addr)
-    : I2CSensorDriver(bus, addr) {}
-
-bool SHT31Driver::crc8(const uint8_t* data, size_t len, uint8_t expected) {
+static uint8_t crc8_0x31(const uint8_t* data, size_t len) {
     uint8_t crc = 0xFF;
     for (size_t i = 0; i < len; ++i) {
         crc ^= data[i];
@@ -341,7 +341,101 @@ bool SHT31Driver::crc8(const uint8_t* data, size_t len, uint8_t expected) {
             crc = (crc & 0x80) ? (crc << 1) ^ 0x31 : (crc << 1);
         }
     }
-    return crc == expected;
+    return crc;
+}
+
+// ---------------------------------------------------------------------------
+// AHT20
+// ---------------------------------------------------------------------------
+
+namespace {
+constexpr uint8_t AHT20_CMD_INIT    = 0xBE;
+constexpr uint8_t AHT20_CMD_TRIGGER = 0xAC;
+constexpr uint8_t AHT20_STATUS_BUSY = 0x80;
+constexpr uint8_t AHT20_STATUS_CAL  = 0x08;
+constexpr uint32_t AHT20_MEAS_WAIT_MS = 80;  // datasheet: >= 75 ms
+constexpr uint32_t AHT20_POLL_MS      = 10;
+constexpr int      AHT20_POLL_TRIES   = 5;
+} // namespace
+
+AHT20Driver::AHT20Driver(I2CInterface& bus, uint8_t addr)
+    : I2CSensorDriver(bus, addr) {}
+
+bool AHT20Driver::readStatus(uint8_t& status) {
+    return bus_.readRaw(address_, &status, 1) == 1;
+}
+
+// The AHT20 has no ID register, so probe() can only confirm that something
+// at 0x38 ACKs and returns a status byte. init() does the real validation
+// (idle + calibrated), which rejects most other chips that share 0x38.
+bool AHT20Driver::probe() {
+    if (!bus_.devicePresent(address_)) return false;
+    uint8_t status = 0;
+    return readStatus(status);
+}
+
+bool AHT20Driver::init() {
+    if (!probe()) return false;
+    bus_.delayMs(40);  // power-on time
+
+    uint8_t status = 0;
+    if (!readStatus(status)) return false;
+    // An idle AHT20 is never busy here; a stuck busy bit (e.g. 0xFF from a
+    // GPIO expander with pull-ups) means this isn't an AHT20.
+    if (status & AHT20_STATUS_BUSY) return false;
+
+    // Only send the initialise command if the part isn't calibrated yet, so
+    // we don't write to a chip we haven't positively identified.
+    if (!(status & AHT20_STATUS_CAL)) {
+        uint8_t p[2] = {0x08, 0x00};
+        if (!bus_.writeBytes(address_, AHT20_CMD_INIT, p, 2)) return false;
+        bus_.delayMs(10);
+        if (!readStatus(status)) return false;
+        if (!(status & AHT20_STATUS_CAL)) return false;
+    }
+
+    initialized_ = true;
+    return true;
+}
+
+std::vector<SensorReading> AHT20Driver::read() {
+    std::vector<SensorReading> out;
+    if (!initialized_) return out;
+
+    uint8_t p[2] = {0x33, 0x00};
+    if (!bus_.writeBytes(address_, AHT20_CMD_TRIGGER, p, 2)) return out;
+    bus_.delayMs(AHT20_MEAS_WAIT_MS);
+
+    // Poll the busy bit instead of dropping the sample if the conversion
+    // runs slightly long.
+    uint8_t b[7] = {};
+    bool ready = false;
+    for (int i = 0; i < AHT20_POLL_TRIES; ++i) {
+        if (bus_.readRaw(address_, b, 7) < 7) return out;
+        if (!(b[0] & AHT20_STATUS_BUSY)) { ready = true; break; }
+        bus_.delayMs(AHT20_POLL_MS);
+    }
+    if (!ready) return out;
+
+    // b[6] is a CRC-8 over status + 5 data bytes
+    if (crc8_0x31(b, 6) != b[6]) return out;
+
+    uint32_t hRaw = ((uint32_t)b[1] << 12) | ((uint32_t)b[2] << 4) | (b[3] >> 4);
+    uint32_t tRaw = ((uint32_t)(b[3] & 0x0F) << 16) | ((uint32_t)b[4] << 8) | b[5];
+    out.push_back(make("temperature", tRaw * 200.0 / 1048576.0 - 50.0, "°C"));
+    out.push_back(make("humidity",    hRaw * 100.0 / 1048576.0,        "%RH"));
+    return out;
+}
+
+// ---------------------------------------------------------------------------
+// SHT31
+// ---------------------------------------------------------------------------
+
+SHT31Driver::SHT31Driver(I2CInterface& bus, uint8_t addr)
+    : I2CSensorDriver(bus, addr) {}
+
+bool SHT31Driver::crc8(const uint8_t* data, size_t len, uint8_t expected) {
+    return crc8_0x31(data, len) == expected;
 }
 
 bool SHT31Driver::probe() {
