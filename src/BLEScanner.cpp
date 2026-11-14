@@ -536,7 +536,9 @@ bool BLEScanner::startPair(const blesec::PairOptions& opts, std::string& err, bo
     pairStartMs_ = millis();
     unlock();
 
-    // Security parameters for this pairing (outside the mutex).
+    // Security parameters for this pairing (outside the mutex); reset to the
+    // defaults when it ends (AUTH_CMPL or link loss).
+    resetSecurityDefaults();
     esp_ble_auth_req_t auth = opts.mitm ? ESP_LE_AUTH_REQ_SC_MITM_BOND : ESP_LE_AUTH_REQ_SC_BOND;
     esp_ble_io_cap_t iocap = static_cast<esp_ble_io_cap_t>(opts.ioCap);
     uint8_t keySize = 16;
@@ -573,9 +575,28 @@ BLEScanner::PairStatus BLEScanner::pairStatus() const {
     return s;
 }
 
+bool BLEScanner::pairRequestLive(const uint8_t* addr) const {
+    return pair_.state == blesec::PairState::Pairing && hasPeer_ &&
+           memcmp(addr, peerAddr_, 6) == 0 &&
+           millis() - pairStartMs_ < blesec::PAIR_TIMEOUT_MS;
+}
+
+void BLEScanner::forgetPairAnswers() {
+    pairOpts_ = blesec::PairOptions();
+}
+
+void BLEScanner::resetSecurityDefaults() {
+    uint8_t unused = 0;
+    esp_ble_gap_set_security_param(ESP_BLE_SM_CLEAR_STATIC_PASSKEY, &unused, sizeof(unused));
+    esp_ble_auth_req_t auth = ESP_LE_AUTH_REQ_SC_BOND;
+    esp_ble_io_cap_t iocap = ESP_IO_CAP_NONE;
+    esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE, &auth, sizeof(auth));
+    esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &iocap, sizeof(iocap));
+}
+
 bool BLEScanner::answerPasskey(uint32_t passkey, std::string& err) {
     lock();
-    if (pair_.state != blesec::PairState::Pairing || !pair_.needsPasskey || !hasPeer_) {
+    if (!pair_.needsPasskey || !pairRequestLive(peerAddr_)) {
         err = "no passkey request pending";
         unlock();
         return false;
@@ -590,7 +611,7 @@ bool BLEScanner::answerPasskey(uint32_t passkey, std::string& err) {
 
 bool BLEScanner::answerConfirm(bool accept, std::string& err) {
     lock();
-    if (pair_.state != blesec::PairState::Pairing || !pair_.needsConfirm || !hasPeer_) {
+    if (!pair_.needsConfirm || !pairRequestLive(peerAddr_)) {
         err = "no numeric comparison pending";
         unlock();
         return false;
@@ -640,24 +661,35 @@ bool BLEScanner::onPairingEvent(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_par
         case ESP_GAP_BLE_PASSKEY_REQ_EVT: {
             // The peer displays a passkey and we must enter it: use the one
             // given to ble/pair, or wait for ble/pair/passkey (SMP allows 30 s).
+            // Only for a live ble/pair with this peer; anything else (a
+            // peer-initiated pairing, a stale request) is refused.
+            uint8_t* addr = param->ble_security.ble_req.bd_addr;
             lock();
-            const bool have = pairOpts_.hasPasskey;
+            const bool live = pairRequestLive(addr);
+            const bool have = live && pairOpts_.hasPasskey;
             const uint32_t pk = pairOpts_.passkey;
-            if (!have) pair_.needsPasskey = true;
+            if (live && !have) pair_.needsPasskey = true;
             unlock();
-            if (have) esp_ble_passkey_reply(param->ble_security.ble_req.bd_addr, true, pk);
+            if (!live)      esp_ble_passkey_reply(addr, false, 0);
+            else if (have)  esp_ble_passkey_reply(addr, true, pk);
             return true;
         }
         case ESP_GAP_BLE_NC_REQ_EVT: {
             // Numeric comparison: accept now if ble/pair said confirm:true,
             // else wait for ble/pair/confirm after the user compared values.
+            // Refused outside a live ble/pair with this peer.
+            uint8_t* addr = param->ble_security.ble_req.bd_addr;
             lock();
-            pair_.hasCompareValue = true;
-            pair_.compareValue = param->ble_security.key_notif.passkey;
-            const bool ok = pairOpts_.confirm;
-            if (!ok) pair_.needsConfirm = true;
+            const bool live = pairRequestLive(addr);
+            const bool ok = live && pairOpts_.confirm;
+            if (live) {
+                pair_.hasCompareValue = true;
+                pair_.compareValue = param->ble_security.key_notif.passkey;
+                if (!ok) pair_.needsConfirm = true;
+            }
             unlock();
-            if (ok) esp_ble_confirm_reply(param->ble_security.ble_req.bd_addr, true);
+            if (!live)    esp_ble_confirm_reply(addr, false);
+            else if (ok)  esp_ble_confirm_reply(addr, true);
             return true;
         }
         case ESP_GAP_BLE_PASSKEY_NOTIF_EVT: {
@@ -671,6 +703,7 @@ bool BLEScanner::onPairingEvent(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_par
         case ESP_GAP_BLE_AUTH_CMPL_EVT: {
             const esp_ble_auth_cmpl_t& c = param->ble_security.auth_cmpl;
             lock();
+            forgetPairAnswers();
             if (hasPeer_ && memcmp(c.bd_addr, peerAddr_, 6) == 0) {
                 pair_.needsPasskey = false;
                 pair_.needsConfirm = false;
@@ -686,6 +719,7 @@ bool BLEScanner::onPairingEvent(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_par
                 }
             }
             unlock();
+            resetSecurityDefaults();
             return true;
         }
         default:
@@ -738,6 +772,7 @@ bool BLEScanner::connect(const std::string& mac, uint32_t timeoutMs, int addrTyp
     connectTimeoutMs_ = timeoutMs;
     mtu_ = gattcore::DEFAULT_ATT_MTU;
     pair_ = PairStatus();
+    forgetPairAnswers();
     openIssued_ = false;
     // The GATT app registration survives across connections, and registering
     // the same app id again fails with ESP_GATT_ERROR (REG_EVT not OK), which
@@ -1253,8 +1288,10 @@ void BLEScanner::onGattcEvent(esp_gattc_cb_event_t event, esp_gatt_if_t gattcIf,
                 connId_ = 0;
                 if (pair_.state == blesec::PairState::Pairing) pair_.state = blesec::PairState::Failed;
                 pair_.encrypted = false;
+                forgetPairAnswers();
             }
             unlock();
+            resetSecurityDefaults();   // no pairing answers outlive the link
             break;
         }
         case ESP_GATTC_CLOSE_EVT: {
@@ -1273,6 +1310,7 @@ void BLEScanner::onGattcEvent(esp_gattc_cb_event_t event, esp_gatt_if_t gattcIf,
                 connId_ = 0;
                 if (pair_.state == blesec::PairState::Pairing) pair_.state = blesec::PairState::Failed;
                 pair_.encrypted = false;
+                forgetPairAnswers();
             }
             unlock();
             break;

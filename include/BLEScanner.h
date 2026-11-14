@@ -344,6 +344,14 @@ private:
     gattops::NotifyQueue notifyQueue_;
 #ifndef NATIVE_TEST
     bool onPairingEvent(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* param);
+    // True while a ble/pair for the current peer `addr` is running (mutex held).
+    bool pairRequestLive(const uint8_t* addr) const;
+    // Forget per-pairing answers so they can never apply to a later or
+    // peer-initiated pairing (mutex held; the static passkey is cleared by
+    // the caller outside the mutex via clearStaticPasskey()).
+    void forgetPairAnswers();
+    // Back to Just Works / no static passkey: what a peer-initiated pairing gets.
+    static void resetSecurityDefaults();
 #endif
     // Pairing state (guarded by mutex_).
     blesec::PairOptions pairOpts_;
