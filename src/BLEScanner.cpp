@@ -103,10 +103,19 @@ static void gattcTrampoline(esp_gattc_cb_event_t event, esp_gatt_if_t gattcIf,
     }
 }
 
+#if BLE_EXT_SCAN
+static void gapTrampoline(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* param) {
+    if (g_instance != nullptr) g_instance->onGapEvent(event, param);
+}
+#endif
+
 void BLEScanner::begin() {
     BLEDevice::init("");
     g_instance = this;
     BLEDevice::setCustomGattcHandler(gattcTrampoline);
+#if BLE_EXT_SCAN
+    BLEDevice::setCustomGapHandler(gapTrampoline);
+#endif
 }
 
 bool BLEScanner::startScan(uint32_t durationMs, const blecore::CaptureFilter& filter) {
@@ -123,6 +132,30 @@ bool BLEScanner::startScan(uint32_t durationMs, const blecore::CaptureFilter& fi
     scanning_ = true;
     unlock();
 
+#if BLE_EXT_SCAN
+    {
+        // Active scan on 1M and Coded PHY, ~90% duty on each; no duplicate
+        // filtering (payload changes are the signal).  Duration is in 10 ms
+        // units, 0 = until stopped.
+        esp_ble_ext_scan_params_t params = {};
+        params.own_addr_type  = BLE_ADDR_TYPE_PUBLIC;
+        params.filter_policy  = BLE_SCAN_FILTER_ALLOW_ALL;
+        params.scan_duplicate = BLE_SCAN_DUPLICATE_DISABLE;
+        params.cfg_mask       = ESP_BLE_GAP_EXT_SCAN_CFG_UNCODE_MASK | ESP_BLE_GAP_EXT_SCAN_CFG_CODE_MASK;
+        params.uncoded_cfg    = {BLE_SCAN_TYPE_ACTIVE, 0x50, 0x48};   // 50 ms / 45 ms
+        params.coded_cfg      = {BLE_SCAN_TYPE_ACTIVE, 0x50, 0x48};
+        uint32_t units = durationMs == 0 ? 0 : (durationMs + 9) / 10;
+        if (units > 0xFFFF) units = 0xFFFF;  // ~655 s, the HCI maximum
+        if (esp_ble_gap_set_ext_scan_params(&params) != ESP_OK ||
+            esp_ble_gap_start_ext_scan(units, 0) != ESP_OK) {
+            lock();
+            scanning_ = false;
+            unlock();
+            return false;
+        }
+        return true;
+    }
+#endif
     BLEScan* scan = BLEDevice::getScan();
     // wantDuplicates=true: deliver every advertisement to the callback so the
     // per-device payload history can capture payload changes.  The library
@@ -150,7 +183,11 @@ void BLEScanner::stopScan() {
     if (!scanning_) { unlock(); return; }
     scanning_ = false;
     unlock();
+#if BLE_EXT_SCAN
+    esp_ble_gap_stop_ext_scan();
+#else
     BLEDevice::getScan()->stop();
+#endif
 }
 
 bool BLEScanner::isScanning() const {
@@ -255,34 +292,39 @@ void BLEScanner::clearResults() {
 
 void BLEScanner::onAdv(BLEAdvertisedDevice* adv) {
     if (adv == nullptr) return;
-    lock();
-
-    std::string mac = adv->getAddress().toString();
-    std::string payloadHex;
-    uint8_t* raw = adv->getPayload();
-    size_t rawLen = adv->getPayloadLength();
-    if (raw != nullptr && rawLen > 0) {
-        payloadHex = hexEncode(raw, rawLen);
-    }
-
+    AdvInput in;
+    in.mac = adv->getAddress().toString();
+    in.addrType = static_cast<uint8_t>(adv->getAddressType());
+    in.rssi = adv->getRSSI();
+    in.raw = adv->getPayload();
+    in.rawLen = adv->getPayloadLength();
+    in.connectable = payloadIsConnectable(in.raw, in.rawLen);
     // Fields that may arrive only in the scan response (a separate report for
-    // the same MAC): collect them for both the new-device and merge paths.
-    std::string name;
-    if (adv->haveName()) name = adv->getName().c_str();
-    std::string servicesHex;
+    // the same MAC): collected for both the new-device and merge paths.
+    if (adv->haveName()) in.fields.name = adv->getName().c_str();
     for (int i = 0; i < adv->getServiceUUIDCount(); ++i) {
-        if (!servicesHex.empty()) servicesHex += ",";
-        servicesHex += adv->getServiceUUID(i).toString();
+        if (!in.fields.servicesHex.empty()) in.fields.servicesHex += ",";
+        in.fields.servicesHex += adv->getServiceUUID(i).toString();
     }
-    std::string manufacturer;
     if (adv->haveManufacturerData()) {
         std::string md = adv->getManufacturerData();
-        manufacturer = hexEncode(reinterpret_cast<const uint8_t*>(md.data()),
-                                 md.length());
+        in.fields.manufacturer = hexEncode(reinterpret_cast<const uint8_t*>(md.data()),
+                                           md.length());
     }
+    ingestAdv(in);
+}
+
+void BLEScanner::ingestAdv(const AdvInput& in) {
+    lock();
+    const std::string& mac = in.mac;
+    std::string payloadHex;
+    if (in.raw != nullptr && in.rawLen > 0) payloadHex = hexEncode(in.raw, in.rawLen);
+    const std::string& name = in.fields.name;
+    const std::string& servicesHex = in.fields.servicesHex;
+    const std::string& manufacturer = in.fields.manufacturer;
 
     const uint64_t now = millis();
-    const int rssi = adv->getRSSI();
+    const int rssi = in.rssi;
 
     // Merge duplicate reports for the same MAC.
     for (auto& r : reports_) {
@@ -290,6 +332,11 @@ void BLEScanner::onAdv(BLEAdvertisedDevice* adv) {
             r.rssi = rssi;
             r.lastSeen = now;
             blecore::mergeReportFields(r, name, servicesHex, manufacturer);
+            if (in.extended) {
+                r.extended = true;
+                r.primaryPhy = in.primaryPhy;
+                r.secondaryPhy = in.secondaryPhy;
+            }
             const size_t before = r.payloadHistory.size();
             recordPayload(r.payloadHistory, r.count, seenPayloads_[r.mac], payloadHex);
             // MAC-independent registry: also record across all broadcasters.
@@ -322,14 +369,17 @@ void BLEScanner::onAdv(BLEAdvertisedDevice* adv) {
     BLEAdvReport rep;
     rep.mac = mac;
     rep.rssi = rssi;
-    rep.isConnectable = payloadIsConnectable(raw, rawLen);
+    rep.isConnectable = in.connectable;
     rep.firstSeen = now;
     rep.lastSeen = now;
     rep.count = 0;
-    rep.addrType = static_cast<uint8_t>(adv->getAddressType());
+    rep.addrType = in.addrType;
     rep.name = name;
     rep.servicesHex = servicesHex;
     rep.manufacturer = manufacturer;
+    rep.extended = in.extended;
+    rep.primaryPhy = in.primaryPhy;
+    rep.secondaryPhy = in.secondaryPhy;
 
     reports_.push_back(rep);
     recordPayload(reports_.back().payloadHistory, reports_.back().count,
@@ -342,6 +392,72 @@ void BLEScanner::onAdv(BLEAdvertisedDevice* adv) {
     enforceCaptureBudget(mac);
     unlock();
 }
+
+#if BLE_EXT_SCAN
+// ---------------------------------------------------------------------------
+// BLE 5 extended scanning (issue #25)
+//
+// The controller accepts either legacy or extended HCI commands, not a mix,
+// so with BLE_EXT_SCAN everything goes through the extended API: scanning
+// here, and connects via esp_ble_gattc_aux_open (GATT task).  Legacy
+// advertisers are still received (as legacy PDUs in extended reports).
+// ---------------------------------------------------------------------------
+
+void BLEScanner::onGapEvent(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* param) {
+    if (param == nullptr) return;
+    switch (event) {
+        case ESP_GAP_BLE_EXT_ADV_REPORT_EVT: {
+            const esp_ble_gap_ext_adv_reprot_t& r = param->ext_adv_report.params;
+            char mac[18];
+            snprintf(mac, sizeof(mac), "%02x:%02x:%02x:%02x:%02x:%02x", r.addr[0], r.addr[1],
+                     r.addr[2], r.addr[3], r.addr[4], r.addr[5]);
+            // Chained reports (data longer than one HCI event) arrive as
+            // INCOMPLETE fragments followed by the last one: reassemble them,
+            // bounded (one advertiser at a time, at most 1650 bytes).
+            std::string data(reinterpret_cast<const char*>(r.adv_data), r.adv_data_len);
+            {
+                lock();
+                if (!extFrag_.empty() && extFragMac_ != mac) extFrag_.clear();
+                if (r.data_status == ESP_BLE_GAP_EXT_ADV_DATA_INCOMPLETE) {
+                    if (extFrag_.size() + data.size() <= 1650) {
+                        extFragMac_ = mac;
+                        extFrag_ += data;
+                    }
+                    unlock();
+                    return;
+                }
+                if (!extFrag_.empty()) {
+                    data = extFrag_ + data;
+                    extFrag_.clear();
+                }
+                unlock();
+            }
+            AdvInput in;
+            in.mac = mac;
+            in.addrType = r.addr_type;
+            in.rssi = r.rssi;
+            in.raw = reinterpret_cast<const uint8_t*>(data.data());
+            in.rawLen = data.size();
+            in.fields = blecore::parseAdvFields(in.raw, in.rawLen);
+            in.extended = !blecore::extReportIsLegacy(r.event_type);
+            in.connectable = blecore::extReportConnectable(r.event_type) &&
+                             payloadIsConnectable(in.raw, in.rawLen);
+            in.primaryPhy = r.primary_phy;
+            in.secondaryPhy = in.extended ? r.secondly_phy : 0;
+            ingestAdv(in);
+            break;
+        }
+        case ESP_GAP_BLE_SCAN_TIMEOUT_EVT:
+        case ESP_GAP_BLE_EXT_SCAN_STOP_COMPLETE_EVT:
+            lock();
+            scanning_ = false;
+            unlock();
+            break;
+        default:
+            break;
+    }
+}
+#endif // BLE_EXT_SCAN
 
 // ---------------------------------------------------------------------------
 // GATT client — raw esp_gattc state machine
@@ -614,7 +730,21 @@ void BLEScanner::gattTaskBody() {
         if (doRegister) {
             esp_ble_gattc_app_register(GATTC_APP_ID);
         } else if (doOpen) {
+#if BLE_EXT_SCAN
+            {
+                // Extended create-connection (legacy HCI commands are refused
+                // once the controller is in extended mode).  1M PHY.
+                esp_ble_gap_conn_params_t cp = {};
+                cp.scan_interval = 0x50; cp.scan_window = 0x48;      // 50 / 45 ms
+                cp.interval_min = 24;    cp.interval_max = 40;       // 30-50 ms
+                cp.latency = 0;          cp.supervision_timeout = 400; // 4 s
+                esp_ble_gap_prefer_ext_connect_params_set(peer, ESP_BLE_GAP_PHY_1M_PREF_MASK,
+                                                          &cp, nullptr, nullptr);
+                esp_ble_gattc_aux_open(gif, peer, peerType, true);
+            }
+#else
             esp_ble_gattc_open(gif, peer, peerType, true);
+#endif
         } else if (doSearch) {
             esp_ble_gattc_search_service(gif, cid, nullptr);
         } else if (doClose) {

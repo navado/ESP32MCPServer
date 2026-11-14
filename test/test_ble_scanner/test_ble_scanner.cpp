@@ -483,6 +483,48 @@ void test_capture_filter_service_and_mac_prefix(void) {
     TEST_ASSERT_FALSE(captureMatches(f, "f0:68:e3:b3:40:b7", -50, "180f", ""));
 }
 
+// --- extended scanning helpers (#25) ------------------------------------------
+
+void test_parse_adv_fields_like_arduino(void) {
+    // flags, complete name "MCP-EXT", 16-bit 0x180d, 128-bit 6e400001-..., mfg 0xffff + 3 bytes
+    const uint8_t adv[] = {
+        0x02, 0x01, 0x06,
+        0x08, 0x09, 'M', 'C', 'P', '-', 'E', 'X', 'T',
+        0x03, 0x03, 0x0d, 0x18,
+        0x11, 0x07, 0x9e, 0xca, 0xdc, 0x24, 0x0e, 0xe5, 0xa9, 0xe0, 0x93, 0xf3, 0xa3, 0xb5,
+                    0x01, 0x00, 0x40, 0x6e,
+        0x06, 0xff, 0xff, 0xff, 0x01, 0x02, 0x03,
+    };
+    mcp::blecore::AdvFields f = mcp::blecore::parseAdvFields(adv, sizeof(adv));
+    TEST_ASSERT_EQUAL_STRING("MCP-EXT", f.name.c_str());
+    TEST_ASSERT_EQUAL_STRING("0000180d-0000-1000-8000-00805f9b34fb,6e400001-b5a3-f393-e0a9-e50e24dcca9e",
+                             f.servicesHex.c_str());
+    TEST_ASSERT_EQUAL_STRING("ffff010203", f.manufacturer.c_str());
+}
+
+void test_parse_adv_fields_short_name_and_malformed(void) {
+    const uint8_t shortName[] = {0x04, 0x08, 'a', 'b', 'c'};
+    TEST_ASSERT_EQUAL_STRING("abc", mcp::blecore::parseAdvFields(shortName, sizeof(shortName)).name.c_str());
+    // complete name wins over a short name that comes later
+    const uint8_t both[] = {0x03, 0x09, 'x', 'y', 0x02, 0x08, 'z'};
+    TEST_ASSERT_EQUAL_STRING("xy", mcp::blecore::parseAdvFields(both, sizeof(both)).name.c_str());
+    // a length running past the end stops parsing without reading out of bounds
+    const uint8_t bad[] = {0x02, 0x01, 0x06, 0x20, 0x09, 'q'};
+    mcp::blecore::AdvFields f = mcp::blecore::parseAdvFields(bad, sizeof(bad));
+    TEST_ASSERT_TRUE(f.name.empty());
+    TEST_ASSERT_TRUE(mcp::blecore::parseAdvFields(nullptr, 0).name.empty());
+}
+
+void test_ext_report_event_type_bits(void) {
+    TEST_ASSERT_TRUE(mcp::blecore::extReportIsLegacy(0x13));      // legacy ADV_IND
+    TEST_ASSERT_TRUE(mcp::blecore::extReportConnectable(0x13));
+    TEST_ASSERT_FALSE(mcp::blecore::extReportIsLegacy(0x00));     // extended, non-connectable
+    TEST_ASSERT_FALSE(mcp::blecore::extReportConnectable(0x00));
+    TEST_ASSERT_TRUE(mcp::blecore::extReportConnectable(0x01));
+    TEST_ASSERT_EQUAL_STRING("coded", mcp::blecore::phyName(3));
+    TEST_ASSERT_EQUAL_STRING("1M", mcp::blecore::phyName(1));
+}
+
 int runUnityTests(void) {
     UNITY_BEGIN();
     RUN_TEST(test_hex_encode_basic);
@@ -530,6 +572,9 @@ int runUnityTests(void) {
     RUN_TEST(test_capture_filter_min_rssi);
     RUN_TEST(test_capture_filter_manufacturer_prefix_little_endian);
     RUN_TEST(test_capture_filter_service_and_mac_prefix);
+    RUN_TEST(test_parse_adv_fields_like_arduino);
+    RUN_TEST(test_parse_adv_fields_short_name_and_malformed);
+    RUN_TEST(test_ext_report_event_type_bits);
     return UNITY_END();
 }
 
