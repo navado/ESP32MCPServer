@@ -96,12 +96,33 @@ Set a count to <strong>0</strong> to let the device auto-compute from the RAM bu
 </table>
 
 <script>
+
+// MCP access token (issue #22).  With authentication on, the status and
+// settings endpoints need a token: it is sent as a bearer header, asked for
+// on 401/403 and remembered (same key as the dashboard).
+const TOKEN_KEY = 'mcpToken';
+function storedToken() {
+  try { return localStorage.getItem(TOKEN_KEY) || ''; } catch (_) { return ''; }
+}
+async function authFetch(url, opts = {}) {
+  const go = (t) => fetch(url, t ? { ...opts, headers: { ...(opts.headers || {}), Authorization: 'Bearer ' + t } } : opts);
+  let r = await go(storedToken());
+  if (r.status === 401 || r.status === 403) {
+    const t = (prompt(r.status === 403 ? 'This change needs the full-control MCP token'
+                                         : 'MCP access token (serial console: token show)') || '').trim();
+    if (t) {
+      try { localStorage.setItem(TOKEN_KEY, t); } catch (_) {}
+      r = await go(t);
+    }
+  }
+  return r;
+}
 const FIELDS = ['ramBudgetBytes','safetyMarginBytes',
                 'canFrameCount','nmeaLineCount','nmea2000Count','obdiiCount'];
 
 async function load() {
   try {
-    const r = await fetch('/bus-history');
+    const r = await authFetch('/bus-history');
     const d = await r.json();
     populate(d);
   } catch(e) { showStatus('Failed to load: ' + e, false); }
@@ -152,7 +173,7 @@ async function applyConfig() {
     if (el) params.append(k, el.value);
   }
   try {
-    const r = await fetch('/bus-history', { method: 'POST', body: params,
+    const r = await authFetch('/bus-history', { method: 'POST', body: params,
                            headers: {'Content-Type': 'application/x-www-form-urlencoded'} });
     const d = await r.json();
     populate(d);

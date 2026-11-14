@@ -259,6 +259,20 @@ function loadToken() {
   }
   try { return localStorage.getItem(TOKEN_KEY) || ''; } catch (_) { return ''; }
 }
+// Bearer token on the port-80 settings endpoints when auth is on (#22).
+async function authFetch(url, opts = {}) {
+  const go = (t) => fetch(url, t ? { ...opts, headers: { ...(opts.headers || {}), Authorization: 'Bearer ' + t } } : opts);
+  let r = await go(loadToken());
+  if (r.status === 401 || r.status === 403) {
+    const t = (prompt(r.status === 403 ? 'This change needs the full-control MCP token'
+                                         : 'MCP access token (serial console: token show)') || '').trim();
+    if (t) {
+      try { localStorage.setItem(TOKEN_KEY, t); } catch (_) {}
+      r = await go(t);
+    }
+  }
+  return r;
+}
 function wsUrl(token) {
   return token ? `${WS_BASE}?token=${encodeURIComponent(token)}` : WS_BASE;
 }
@@ -645,7 +659,7 @@ document.getElementById('btn-console-clear').addEventListener('click', () => {
 // ════════════════════════════════════════════════════════════════
 async function loadDiscovery() {
   try {
-    const resp = await fetch('/discovery');
+    const resp = await authFetch('/discovery');
     if (!resp.ok) { document.getElementById('disc-save-status').textContent = 'Discovery endpoint not available.'; return; }
     const d = await resp.json();
     document.getElementById('disc-hostname').textContent      = d.hostname      || '—';
@@ -681,7 +695,7 @@ document.getElementById('btn-disc-save').addEventListener('click', async () => {
   fd.append('broadcastInterval', document.getElementById('disc-edit-interval').value);
   const statusEl = document.getElementById('disc-save-status');
   try {
-    const resp = await fetch('/discovery', { method: 'POST', body: fd });
+    const resp = await authFetch('/discovery', { method: 'POST', body: fd });
     if (resp.ok) {
       statusEl.style.color = '#2ecc71';
       statusEl.textContent = 'Saved.';

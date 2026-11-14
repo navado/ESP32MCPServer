@@ -569,6 +569,7 @@ void setup() {
     // first request.
     const mcp::auth::Credentials mcpCreds = loadMcpCredentials();
     mcpHttp.setCredentials(mcpCreds);
+    networkManager.setCredentials(mcpCreds);   // port-80 endpoints (#22)
     // An HTTP session that owns a BLE scan, link or subscription is never
     // evicted to make room for another session (it would drop the link).
     mcpHttp.setPinnedCheck([](uint8_t cid) {
@@ -1082,7 +1083,10 @@ void setup() {
         [](uint8_t cid, uint32_t id, const JsonObject& p) -> std::string {
             std::string mac;
             if (p["mac"].is<const char*>()) mac = p["mac"].as<const char*>();
-            uint32_t timeoutMs = p["timeoutMs"] | 5000u;
+            // 10 s default: a connect needs one connectable advertisement to
+            // land in the initiator scan window, and peripherals advertising
+            // at ~1 s intervals (e.g. BlueZ defaults) often need 5-10 s (#27).
+            uint32_t timeoutMs = p["timeoutMs"] | 10000u;
             int addrType = -1;  // default: type recorded by the last scan
             if (p["addrType"].is<const char*>()) {
                 uint8_t t = 0;

@@ -67,6 +67,22 @@ Access authenticate(const Credentials& creds, const std::string& authorizationHe
 // bus history reads, BLE scanning and status).  None: nothing.
 bool methodAllowed(Access access, const std::string& method);
 
+// --- Port-80 HTTP endpoints (issue #22) ------------------------------------
+// What a web endpoint needs: Public (pages, no device data), Read (status /
+// settings reads: either token), Full (changes: full-control token).
+enum class HttpNeed { Public, Read, Full };
+
+// Decide a request to a port-80 endpoint.  Returns 0 to allow it, or the
+// HTTP status to answer: 401 (no or wrong token) or 403 (read-only token on
+// a change).  Auth off (creds.required == false) allows everything.
+// `provisioning`: the device has no WiFi network saved and the request came
+// in over its own setup access point; nobody can know the token yet, so
+// everything is allowed (as before #22).  A device that fell back to its
+// AP after its saved network failed is NOT provisioning.
+int httpEndpointStatus(const Credentials& creds, HttpNeed need,
+                       const std::string& authorizationHeader, const std::string& url,
+                       bool provisioning);
+
 // Token bucket: `capacity` burst, refilled at `refillPerSec`.
 class RateLimiter {
 public:

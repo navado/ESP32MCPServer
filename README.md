@@ -323,13 +323,14 @@ Tokens can also be pre-provisioned in an NVS image, like the WiFi credentials.
 | Requests per client | burst 20, then 10/s | `MCP_RATE_BURST`, `MCP_RATE_PER_SEC` | `-32021 Rate limited` with `data.retryAfterMs` |
 | Idle clients | ping every 15 s | — | Dropped after 2 missed pongs |
 
+**Port-80 HTTP endpoints.** With authentication on, the status and settings endpoints need a token too: reads accept either token, and changes need the full-control token. Without a token the response is `401`; a read-only token on a change gets `403`. See [HTTP Endpoints](#http-endpoints-port-80). The HTML pages themselves stay public (they contain no device data), and the WiFi setup page, dashboard and bus-history page ask for the token when they get a `401`. One exception: while the device has **no WiFi network saved** and serves its setup access point, everything stays open, since nobody can know the token before provisioning. A device that falls back to its access point because its saved network is unreachable still requires the token.
+
 **OTA.**
 - There is no compiled-in default password. A random per-device password is generated on first boot, and also on a device that still holds the old `admin` default. It is printed once on the serial console.
 - After 5 consecutive wrong logins **from one IP address**, that address gets `429` (with `Retry-After`) for 30 s, doubling up to 5 minutes per further failure. Other hosts are not affected, so a guessing host can't lock the owner out. Up to 32 source addresses are tracked. Beyond that, the remaining sources share one lockout, so rotating addresses doesn't buy extra guesses. The tradeoff: an attacker with more than 32 failing LAN addresses can delay OTA logins from new hosts for a few minutes. USB flashing and the serial console are never affected.
 
 **Not covered yet.**
 - **TLS.** Neither transport is encrypted: the WebSocket library has no server-side TLS on ESP32, and the HTTP server used for `/mcp` doesn't either. On the 4 MB boards there is no flash headroom for TLS at all. Use a trusted network, or a TLS-terminating proxy or VPN.
-- The other port-80 HTTP endpoints (dashboard, WiFi setup, `/bus-history`) are unauthenticated. `/mcp` requires the token when authentication is on.
 - OAuth 2.1 (MCP authorization for HTTP transports) doesn't fit on the device. `/mcp` takes the same static bearer token, which MCP clients can send as a configured `Authorization` header.
 
 ---
@@ -349,15 +350,23 @@ A browser-based dashboard is served from flash at **`http://<IP>/app`**.
 
 ## HTTP Endpoints (port 80)
 
-| Method | Path | Description |
-|---|---|---|
-| GET | `/` | WiFi setup page |
-| POST | `/save` | Save WiFi credentials (`ssid`, `password` form params) |
-| GET | `/status` | Network status JSON |
-| WS | `/ws` | Real-time network status WebSocket |
-| GET | `/app` | Browser dashboard |
-| GET | `/bus-history` | Read bus history config JSON |
-| POST | `/bus-history` | Update bus history config JSON |
+The **Auth on** column applies only when authentication is turned on (see [Security](#security)); with it off, every endpoint is open. Send `Authorization: Bearer <token>`, or `?token=` on `/ws`.
+
+| Method | Path | Description | Auth on |
+|---|---|---|---|
+| GET | `/` | WiFi setup page | public |
+| POST | `/save` | Save WiFi credentials (`ssid`, `password` form params) | full |
+| GET | `/status` | Network status JSON | read |
+| WS | `/ws` | Real-time network status WebSocket | read (`?token=`) |
+| GET | `/app` | Browser dashboard | public |
+| GET / POST | `/discovery` | Read / change mDNS and discovery settings | read / full |
+| GET | `/bus-history-config` | Bus history settings page | public |
+| GET / POST | `/bus-history` | Read / change the bus history config JSON | read / full |
+| GET | `/ota` | OTA upload page | public |
+| GET | `/ota/status` | Firmware version and update state | public |
+| GET / POST | `/ota/config` | OTA settings | OTA password (Basic) |
+| POST | `/ota/update` | Firmware upload | OTA password (Basic) |
+| POST / GET / DELETE | `/mcp` | MCP Streamable HTTP | read or full, per method |
 
 ---
 
@@ -753,7 +762,7 @@ The ESP32-S3 acts as a **BLE central** controlled over MCP: it captures what nea
 | `ble/scan/payloads` | — | Stop the scan and return the **MAC-independent payload registry**: distinct payloads across ALL broadcasters, first-seen order, with `count` + `firstSeen`/`lastSeen` (ms since scan start), plus `dropped`: distinct payloads discarded because the registry (64 entries) was full. The primary artifact for protocol reverse-engineering — survives per-MAC MAC-rotation churn |
 | `ble/scan/poll` | — | Live read of the payload registry WITHOUT stopping the scan (stateless; diff by `firstSeen`) |
 | `ble/scan/stop` | — | Stop a continuous scan early |
-| `ble/connect` | `mac`, `timeoutMs?`, `addrType?` | Begin an **asynchronous** GATT connect to a peer MAC (default timeout 5000 ms). `addrType` is `public`, `random`, `rpa-public` or `rpa-random`; when omitted, the type recorded by the last scan for that MAC is used (public if it was not seen). Most phones, watches and sensors use random addresses and cannot be opened as public. A malformed `mac` is `-32602`; a link that is already connecting, connected, enumerating or closing (or an OTA in progress) is `-32010` with the GATT `state` and `resolve: "ble/disconnect"` |
+| `ble/connect` | `mac`, `timeoutMs?`, `addrType?` | Begin an **asynchronous** GATT connect to a peer MAC (default timeout 10000 ms; a peripheral that advertises about once a second, like a BlueZ default, often needs 5–10 s). `addrType` is `public`, `random`, `rpa-public` or `rpa-random`; when omitted, the type recorded by the last scan for that MAC is used (public if it was not seen). Most phones, watches and sensors use random addresses and cannot be opened as public. A malformed `mac` is `-32602`; a link that is already connecting, connected, enumerating or closing (or an OTA in progress) is `-32010` with the GATT `state` and `resolve: "ble/disconnect"` |
 | `ble/connect/results` | — | Poll the outcome of the last async connect |
 | `ble/disconnect` | — | Drop the GATT link |
 | `ble/services/start` | — | Enumerate services/characteristics (background task); returns immediately. Not connected (or still connecting / closing): `-32013 Feature not ready` with `resolve`; an enumeration already running: `-32010` with `resolve: "ble/services/results"` |
@@ -803,7 +812,7 @@ Notes for reverse engineering:
 #### `ble/connect` / `ble/connect/results` / `ble/services/*`
 
 ```json
-{"jsonrpc":"2.0","method":"ble/connect","id":16,"params":{"mac":"00:1b:66:c6:da:c8","timeoutMs":5000}}
+{"jsonrpc":"2.0","method":"ble/connect","id":16,"params":{"mac":"00:1b:66:c6:da:c8","timeoutMs":10000}}
 ```
 ```json
 {"jsonrpc":"2.0","id":16,"result":{"started":true,"connecting":true,"connected":false,"addrType":"public"}}

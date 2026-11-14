@@ -6,6 +6,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- **Port-80 endpoints require the token when MCP auth is on** — #22. `/status`, `/ws`,
+  `/discovery` and `/bus-history` reads accept either token; `/save` and the settings
+  changes need the full-control token (`401` / `403`). The HTML pages stay public and ask
+  for the token. WiFi provisioning on the setup access point (no network saved yet) stays
+  open. No change with auth off.
 - **Optional MCP access tokens** — #12
   - **Off by default**: existing clients and examples keep working unchanged. Turn it on
     with the serial command `auth on` (or `auth off` to undo), or ship it on with the
@@ -85,6 +90,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `partitions_4mb_ota.csv` with 1.81 MB OTA slots for 4 MB ESP32 boards — #9.
 
 ### Changed
+- `ble/connect` waits up to 10 s by default (was 5 s), and so do the example clients. Slow
+  advertisers often need 5–10 s to connect — #27.
 - **`ble/*` failure results are now JSON-RPC errors** — #15. `ble/scan` while a scan is
   running returns `-32010` (with `retryAfterMs`) instead of `{started:false, remainingMs}`;
   `ble/connect` while busy returns `-32010` instead of `{started:false}`, and a malformed MAC
@@ -117,6 +124,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   runtime, by the memory plan. — #9, #11
 
 ### Fixed
+- `GET /ota/status` and `GET /ota/config` returned the OTA upload page: the `/ota` route
+  matched them as a prefix. — #21
 - **Streamable HTTP sessions no longer run out** — #13. Clients that exit without
   `DELETE /mcp` (the MCP Inspector CLI does this on every run) held all 4 sessions for
   10 minutes, so further clients got `503 Too many MCP sessions`, and the leaked sessions

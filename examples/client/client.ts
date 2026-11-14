@@ -308,7 +308,7 @@ export class MCPClient {
     /** Connect and wait until the link is up (throws if it does not come up). */
     async bleConnect(mac: string, options: { addrType?: BleAddrType; timeoutMs?: number } = {}):
         Promise<{ connected: true; addrType: BleAddrType }> {
-        const timeoutMs = options.timeoutMs ?? 5000;
+        const timeoutMs = options.timeoutMs ?? 10000;
         const started = await this.request('ble/connect', { mac, ...options, timeoutMs });
         const deadline = Date.now() + timeoutMs + 1000;
         for (;;) {
