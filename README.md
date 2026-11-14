@@ -753,7 +753,18 @@ The ESP32-S3 acts as a **BLE central** controlled over MCP: it captures what nea
 
 **BLE 5 extended advertising.** The S3 builds scan with the BLE 5 extended scanner (`BLE_EXT_SCAN=1`, the default; build with `-D BLE_EXT_SCAN=0` for the legacy scanner). It listens on both the 1M and the Coded PHY and receives legacy and extended advertisements alike. A device seen with extended advertising gets `"extended": true`, plus `phy` (primary) and `secondaryPhy` (`1M`, `2M` or `coded`) in `ble/scan/results`. Extended advertising data up to 1650 bytes is reassembled; the name, services and manufacturer data are parsed from all of it, and each `payloadHistory` entry keeps the first 64 bytes. With extended scanning, connects use the extended create-connection on the 1M PHY. The controller doesn't allow legacy and extended commands to be mixed.
 
-**Not supported (yet):** descriptor writes other than the CCCD; pairing/bonding (encrypted characteristics fail to read or write); more than one connection at a time; and acting as a peripheral/advertiser.
+**Pairing and bonding.** A characteristic that needs an encrypted link shows `readError` (for example `insufficient-encryption`) and `needsPairing: true` in `ble/services/results`. To read it:
+1. Call `ble/pair`, then poll `ble/pair/results` until it reports `paired`.
+2. Run `ble/services/start` again.
+
+Pairing methods:
+- **Just Works:** the default, with no parameters. The key is not authenticated.
+- **Passkey entry:** with `mitm: true`. If the peripheral displays a passkey, `ble/pair/results` reports `needs: "passkey"`; answer with `ble/pair/passkey`. Alternatively, give `passkey` to `ble/pair` up front, or use `iocap: "display"` with a `passkey` for the peripheral to type.
+- **Numeric comparison:** `results` reports `needs: "confirm"` and the `compareValue`; answer with `ble/pair/confirm`.
+
+Bonds are stored in NVS and survive reboots. On a later connection, `ble/pair` re-encrypts with the stored key, with no new pairing (`existingBond: true`). `ble/bonds/list` shows the bonds and `ble/bonds/clear` removes one or all. If you clear a bond here, also remove it on the peripheral. A peripheral that still holds an old bond asks for security when the link opens, and that pairing fails until it forgets the bond.
+
+**Not supported (yet):** descriptor writes other than the CCCD; more than one connection at a time; and acting as a peripheral/advertiser.
 
 **Verified on hardware** (ESP32-S3-DevKitC-1 N16R8) against an nRF52840 peripheral (random static address), an Android phone (rotating random address) and a BlueZ peripheral (public address): connect median 0.43 s (15/15), 47 connect/disconnect cycles with clean teardown on the peer, full enumeration of a phone (7 services / 37 characteristics) with ≥ 49 KB internal heap free throughout.
 
@@ -774,6 +785,12 @@ The ESP32-S3 acts as a **BLE central** controlled over MCP: it captures what nea
 | `ble/subscribe` | `handle` or `uuid`, `indicate?` | Enable notifications (default when supported) or indications. Result says `delivery: "push"` (WebSocket) or `"poll"` (HTTP) |
 | `ble/unsubscribe` | `handle` or `uuid` | Disable them again |
 | `ble/notifications` | — | Values notified since the last call: `{values:[{handle, uuid, valueHex, valueText, ts}], dropped, subscriptions, connected}` |
+| `ble/pair` | `mitm?`, `passkey?`, `confirm?`, `iocap?` (`none`, `display`, `display-yesno`, `keyboard`, `keyboard-display`) | Encrypt the link, pairing and bonding first unless a bond exists. Asynchronous: returns `{started, existingBond, iocap, mitm}`. Not connected: `-32013`; already pairing: `-32010` |
+| `ble/pair/results` | — | `{state: idle\|pairing\|paired\|failed, encrypted, bonded, authenticated, existingBond, needs?, passkey?, compareValue?, reason?}`. `needs` is `passkey` or `confirm` while it waits for an answer |
+| `ble/pair/passkey` | `passkey` | Enter the passkey the peripheral displays |
+| `ble/pair/confirm` | `accept` | Answer a numeric comparison |
+| `ble/bonds/list` | — | `{bonds:[{mac, addrType}]}` |
+| `ble/bonds/clear` | `mac?` | Remove one bond, or all; `{removed}` |
 
 #### `ble/scan` / `ble/scan/results`
 

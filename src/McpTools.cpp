@@ -75,6 +75,25 @@ const char kBleCharRef[] = R"J({"type":"object","properties":{
 "uuid":{"type":"string","description":"Characteristic UUID (if unique on the device)"}},
 "additionalProperties":false})J";
 
+const char kBlePair[] = R"J({"type":"object","properties":{
+"mitm":{"type":"boolean","default":false,"description":"Require an authenticated (MITM-protected) key; needs passkey or confirm"},
+"passkey":{"type":"integer","minimum":0,"maximum":999999,"description":"Passkey: the one the peripheral displays, or (iocap display) the one we show for it to enter"},
+"confirm":{"type":"boolean","default":false,"description":"Accept a numeric comparison (check compareValue against the peer's display)"},
+"iocap":{"type":"string","enum":["none","display","display-yesno","keyboard","keyboard-display"],"description":"Our IO capability. Default: keyboard with passkey, display-yesno with confirm, else none (Just Works)"}},
+"additionalProperties":false})J";
+
+const char kBlePairPasskey[] = R"J({"type":"object","properties":{
+"passkey":{"type":"integer","minimum":0,"maximum":999999,"description":"The passkey the peripheral displays"}},
+"required":["passkey"],"additionalProperties":false})J";
+
+const char kBlePairConfirm[] = R"J({"type":"object","properties":{
+"accept":{"type":"boolean","description":"true if compareValue matches the number the peripheral shows"}},
+"required":["accept"],"additionalProperties":false})J";
+
+const char kBleBondsClear[] = R"J({"type":"object","properties":{
+"mac":{"type":"string","pattern":"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$","description":"Remove only this peer's bond; omit to remove all"}},
+"additionalProperties":false})J";
+
 const char kBleWrite[] = R"J({"type":"object","properties":{
 "handle":{"type":"integer","minimum":1,"maximum":65535,"description":"Characteristic handle from ble_services_results"},
 "uuid":{"type":"string","description":"Characteristic UUID (if unique on the device)"},
@@ -181,6 +200,25 @@ void registerMcpTools(MCPServer& s) {
     s.registerTool(tool("ble_notifications", "Read BLE notifications", "ble/notifications",
         kEmpty, "Values notified on subscribed characteristics since the last call.",
         false, false, false, true));
+    s.registerTool(tool("ble_pair", "Pair with BLE device", "ble/pair", kBlePair,
+        "Encrypt the link to the connected device, pairing and bonding first unless a bond "
+        "already exists (needed for characteristics that report needsPairing). Check with "
+        "ble_pair_results, then re-run ble_services_start to read encrypted values.",
+        false, false, false, true));
+    s.registerTool(tool("ble_pair_results", "BLE pairing state", "ble/pair/results", kEmpty,
+        "Pairing state of the current link: pairing, paired or failed with a reason; encrypted, "
+        "bonded, and a passkey or comparison value to show the user.", true, false, false, false));
+    s.registerTool(tool("ble_pair_passkey", "Enter BLE passkey", "ble/pair/passkey", kBlePairPasskey,
+        "Enter the passkey the peripheral displays, when ble_pair_results says needs: passkey.",
+        false, false, false, true));
+    s.registerTool(tool("ble_pair_confirm", "Confirm BLE pairing number", "ble/pair/confirm",
+        kBlePairConfirm,
+        "Answer a numeric comparison (ble_pair_results says needs: confirm): accept if "
+        "compareValue matches the peripheral's display.", false, false, false, true));
+    s.registerTool(tool("ble_bonds_list", "List BLE bonds", "ble/bonds/list", kEmpty,
+        "Peers this device has bonded with (stored across reboots).", true, false, true, false));
+    s.registerTool(tool("ble_bonds_clear", "Remove BLE bonds", "ble/bonds/clear", kBleBondsClear,
+        "Forget the bond with one peer, or all bonds.", false, true, true, false));
     s.registerTool(tool("ble_disconnect", "Disconnect BLE device", "ble/disconnect", kEmpty,
         "Drop the GATT connection.", false, false, true, true));
 }
