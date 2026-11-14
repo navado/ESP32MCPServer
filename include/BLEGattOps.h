@@ -55,6 +55,8 @@ struct NotifyEvent {
     std::string uuid;
     std::string valueHex;
     uint64_t    timestampMs = 0;
+    size_t      length = 0;         // bytes received (valueHex may be shorter)
+    bool        truncated = false;
 };
 
 // Bounded FIFO of notified values; the oldest are dropped (and counted)

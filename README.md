@@ -743,13 +743,15 @@ The ESP32-S3 acts as a **BLE central** controlled over MCP: it captures what nea
 | **Payload registry** | Distinct payloads across *all* devices, independent of MAC — survives phones and trackers that rotate their MAC address |
 | **Capture filters** | `minRssi`, `manufacturerId`, `serviceUuid`, `macPrefix` decide what is stored, so the device of interest is not crowded out in a busy RF environment |
 | **Connect** | Asynchronous GATT connect with an enforced timeout; public, random static and resolvable private addresses (address type taken from the scan, or given explicitly); repeatable connect / disconnect / reconnect |
-| **Enumerate & read** | All primary/secondary services and characteristics with properties (up to 512 attributes); every readable value read (hex + printable text, first 64 bytes) |
+| **Enumerate & read** | All primary/secondary services and characteristics with properties (up to 512 attributes); every readable value read in full (long reads), as hex + printable text. Up to 512 bytes are kept per value with PSRAM, 128 without, and at most 32 KB (8 KB without PSRAM) over all values of the link. A longer value, or one that arrives once that total is used up, is cut and marked `truncated: true`, and `length` gives its real size |
 | **Notifications** | During enumeration: subscribes to every notify/indicate characteristic and captures the latest value within a bounded window (≤ 10 s) |
 | **Write** | `ble/write` writes a characteristic (with or without response, up to 512 bytes), addressed by handle or UUID. Needs the full-control token |
 | **Subscribe** | `ble/subscribe` enables notifications or indications on one characteristic for as long as needed (up to 8 at once). Values are pushed to WebSocket clients as `notifications/ble/value`; HTTP clients read them with `ble/notifications` (32-value queue, oldest dropped and counted) |
 | **Memory-aware limits** | Capture limits follow the boot-time memory plan: 64 devices / 48 KB with PSRAM, 24 devices / 16 KB without; least-recently-heard devices are evicted first |
 
-**Not supported (yet):** descriptor writes other than the CCCD; pairing/bonding (encrypted characteristics fail to read or write); more than one connection at a time; MTU negotiation (stored values are truncated to 64 bytes; writes are not); BLE 5 extended advertising and Coded PHY (only legacy advertising is received); and acting as a peripheral/advertiser.
+**MTU.** After connecting, the device asks for an ATT MTU of 517 and reports the negotiated value as `mtu` in `ble/connect/results`. The exchange completes a few seconds after the link opens, and the MTU is 23 until then. Writes with a response can be up to 512 bytes; longer than MTU − 3, they are sent as a long write. A write without a response must fit in MTU − 3 bytes, otherwise it gets `-32602` with `data.mtu` and `data.maxBytes`.
+
+**Not supported (yet):** descriptor writes other than the CCCD; pairing/bonding (encrypted characteristics fail to read or write); more than one connection at a time; BLE 5 extended advertising and Coded PHY (only legacy advertising is received); and acting as a peripheral/advertiser.
 
 **Verified on hardware** (ESP32-S3-DevKitC-1 N16R8) against an nRF52840 peripheral (random static address), an Android phone (rotating random address) and a BlueZ peripheral (public address): connect median 0.43 s (15/15), 47 connect/disconnect cycles with clean teardown on the peer, full enumeration of a phone (7 services / 37 characteristics) with ≥ 49 KB internal heap free throughout.
 

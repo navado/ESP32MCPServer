@@ -350,6 +350,8 @@ static void pushBleNotifications() {
         p["valueHex"]  = ev.valueHex;
         p["valueText"] = mcp::blecore::hexToAscii(ev.valueHex);
         p["ts"]        = ev.timestampMs;
+        p["length"]    = ev.length;
+        if (ev.truncated) p["truncated"] = true;
         if (dropped) { p["dropped"] = dropped; dropped = 0; }
         std::string out; serializeJson(doc, out);
         mcpServer.sendToClient(static_cast<uint8_t>(bleNotifyOwner), out);
@@ -369,6 +371,8 @@ static void fillFeatures(JsonObject root) {
     mp["busHistoryCap"]     = memoryPlan.busHistoryCap;
     mp["bleMaxDevices"]     = memoryPlan.bleMaxDevices;
     mp["bleCaptureBytes"]   = memoryPlan.bleCaptureBytes;
+    mp["bleValueBytes"]     = memoryPlan.bleValueBytes;
+    mp["bleValueBudget"]    = memoryPlan.bleValueBudget;
     root["board"] = BOARD_NAME;
 }
 
@@ -430,6 +434,8 @@ static std::string buildServicesResponse(uint32_t id,
             co["properties"] = chr.properties;
             if (!chr.valueHex.empty())  co["valueHex"] = chr.valueHex;
             if (!chr.valueText.empty()) co["valueText"] = chr.valueText;
+            if (!chr.valueHex.empty())  co["length"] = chr.valueLength;
+            if (chr.truncated)          co["truncated"] = true;
         }
     }
     std::string out; serializeJson(doc, out); return out;
@@ -457,7 +463,8 @@ void setup() {
         memoryPlan = plan;
         mcp::BusHistory::setMemoryPolicy(plan.busHistoryInPsram, plan.busHistoryCap);
 #if BOARD_HAS_BLE
-        bleScanner.setCaptureLimits(plan.bleMaxDevices, plan.bleCaptureBytes);
+        bleScanner.setCaptureLimits(plan.bleMaxDevices, plan.bleCaptureBytes, plan.bleValueBytes,
+                                    plan.bleValueBudget);
 #endif
         Serial.printf("[mem] plan=%s psram=%u busHistoryCap=%u bleDevices=%u bleBytes=%u\n",
                       mcp::mem::modeName(plan.mode), (unsigned)ESP.getFreePsram(),
@@ -1139,6 +1146,7 @@ void setup() {
             doc["id"] = id;
             doc["result"]["connecting"] = bleScanner.isConnecting();
             doc["result"]["connected"]  = bleScanner.isConnected();
+            if (bleScanner.isConnected()) doc["result"]["mtu"] = bleScanner.getMtu();
             std::string out; serializeJson(doc, out); return out;
         });
 
@@ -1287,6 +1295,20 @@ void setup() {
                 doc["error"]["data"]["properties"] = ref.properties;
                 std::string out; serializeJson(doc, out); return out;
             }
+            // Without a response a value must fit one packet (MTU - 3); with a
+            // response Bluedroid splits longer values into a long write.
+            const uint16_t mtu = bleScanner.getMtu();
+            if (!withResponse && value.size() > mcp::gattcore::maxWriteNoResponse(mtu)) {
+                JsonDocument doc;
+                doc["jsonrpc"] = "2.0";
+                doc["id"] = id;
+                doc["error"]["code"] = -32602;
+                doc["error"]["message"] =
+                    "Invalid params: value longer than MTU - 3; write with withResponse: true";
+                doc["error"]["data"]["mtu"] = mtu;
+                doc["error"]["data"]["maxBytes"] = mcp::gattcore::maxWriteNoResponse(mtu);
+                std::string out; serializeJson(doc, out); return out;
+            }
             std::string werr;
             if (!bleScanner.writeStart(ref.handle, value, withResponse, werr)) {
                 if (werr == "a write is already in progress")
@@ -1399,6 +1421,8 @@ void setup() {
                 o["valueHex"]  = ev.valueHex;
                 o["valueText"] = mcp::blecore::hexToAscii(ev.valueHex);
                 o["ts"]        = ev.timestampMs;
+                o["length"]    = ev.length;
+                if (ev.truncated) o["truncated"] = true;
             }
             std::string out; serializeJson(doc, out); return out;
         });
