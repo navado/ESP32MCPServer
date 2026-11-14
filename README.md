@@ -277,7 +277,7 @@ pio run -t upload -e nrf52840-dk
 
 ## Security
 
-The device is meant for a **trusted LAN**. MCP authentication is **optional and off by default**: out of the box any host that can reach the device can use it, exactly as before. Turn it on for anything but a lab bench. There is no TLS yet (see below).
+The device is meant for a **trusted LAN**. MCP authentication is **optional and off by default**: out of the box any host that can reach the device can use it, exactly as before. Turn it on for anything but a lab bench. On the ESP32-S3 N16R8 build the MCP transports are also offered over TLS (see [TLS](#tls)); elsewhere traffic is in clear text.
 
 **Turning authentication on or off** (NVS namespace `security`, key `auth`):
 
@@ -290,7 +290,7 @@ The device is meant for a **trusted LAN**. MCP authentication is **optional and 
 
 When authentication is off every client has full control. Rate limits, the client limit and the Origin check stay active either way.
 
-**Threat model.** With authentication off, any host that can reach port 9000 could open BLE connections to nearby devices, read sensor, bus and metrics data, clear logs, and tie up the server. Turning it on stops an unauthenticated host on the network from doing any of that. It does **not** protect against someone who can sniff the traffic: the token and all data travel in clear text over `ws://`, and the OTA password over plain HTTP Basic Auth. Physical access to the USB serial console is trusted: it can show and change every secret.
+**Threat model.** With authentication off, any host that can reach port 9000 could open BLE connections to nearby devices, read sensor, bus and metrics data, clear logs, and tie up the server. Turning it on stops an unauthenticated host on the network from doing any of that. On its own it does **not** protect against someone who can sniff the traffic: over `ws://` and `http://` the token and all data travel in clear text, and the OTA password goes over plain HTTP Basic Auth. Use the TLS endpoints where available. Physical access to the USB serial console is trusted: it can show and change every secret.
 
 **MCP access tokens** (NVS namespace `security`; used only when authentication is on):
 
@@ -329,8 +329,36 @@ Tokens can also be pre-provisioned in an NVS image, like the WiFi credentials.
 - There is no compiled-in default password. A random per-device password is generated on first boot, and also on a device that still holds the old `admin` default. It is printed once on the serial console.
 - After 5 consecutive wrong logins **from one IP address**, that address gets `429` (with `Retry-After`) for 30 s, doubling up to 5 minutes per further failure. Other hosts are not affected, so a guessing host can't lock the owner out. Up to 32 source addresses are tracked. Beyond that, the remaining sources share one lockout, so rotating addresses doesn't buy extra guesses. The tradeoff: an attacker with more than 32 failing LAN addresses can delay OTA logins from new hosts for a few minutes. USB flashing and the serial console are never affected.
 
+### TLS
+
+The **`esp32-s3-devkitc-1-n16r8`** build (`-D MCP_TLS=1`) also serves the MCP transports over TLS on port 443:
+
+| Endpoint | Same as |
+|---|---|
+| `https://<device>/mcp` | `http://<device>/mcp`: Streamable HTTP, the same sessions and tokens |
+| `wss://<device>/ws` | `ws://<device>:9000`: the JSON-RPC WebSocket, with pushes, the same 4401/4429 close codes, `Authorization` header or `?token=` |
+
+The plain endpoints stay available. Authentication works the same on all of them.
+
+**Certificate.** On first boot, once WiFi is up, the device makes an EC P-256 key and a self-signed certificate, valid until 2049, and keeps them in NVS (namespace `tls`). It is a leaf certificate (CA:FALSE, server authentication only), so trusting it never trusts anything else. The certificate names `<hostname>.local`, `<hostname>` and the IP address the device had then. The boot log shows the names and the SHA-256 fingerprint, and so does the serial command `tls show`. `tls rotate` makes a new key and certificate (new fingerprint) on the next boot. Use it if the device gets a different IP address, or use the `.local` name instead.
+
+**Trusting it.**
+1. Download the certificate from `http://<device>/tls.pem`.
+2. Compare its fingerprint with the serial console: `openssl x509 -in tls.pem -noout -fingerprint -sha256`.
+3. Give it to the client as the only CA:
+   - `curl --cacert tls.pem https://<ip>/mcp …`
+   - Python: `ssl.create_default_context(cafile="tls.pem")`
+   - Node-based MCP clients (the Inspector, Claude Code, `mcp-remote`): `NODE_EXTRA_CA_CERTS=tls.pem`
+
+The client then checks the name too. Use the IP in the certificate or `<hostname>.local`.
+
+**Limits.**
+- Each TLS connection needs about 40 KB of buffers. mbedTLS is switched to PSRAM for this, and the server keeps at most 6 sockets.
+- A full ECDSA handshake takes about 2 s. Keep-alive connections and WebSockets pay it once.
+- `wss://` clients count toward the same 4-client WebSocket limit as `ws://:9000`.
+- There is no TLS on the other boards: there's no PSRAM, and the 4 MB boards have no flash headroom for it.
+
 **Not covered yet.**
-- **TLS.** Neither transport is encrypted: the WebSocket library has no server-side TLS on ESP32, and the HTTP server used for `/mcp` doesn't either. On the 4 MB boards there is no flash headroom for TLS at all. Use a trusted network, or a TLS-terminating proxy or VPN.
 - OAuth 2.1 (MCP authorization for HTTP transports) doesn't fit on the device. `/mcp` takes the same static bearer token, which MCP clients can send as a configured `Authorization` header.
 
 ---
@@ -367,6 +395,7 @@ The **Auth on** column applies only when authentication is turned on (see [Secur
 | GET / POST | `/ota/config` | OTA settings | OTA password (Basic) |
 | POST | `/ota/update` | Firmware upload | OTA password (Basic) |
 | POST / GET / DELETE | `/mcp` | MCP Streamable HTTP | read or full, per method |
+| GET | `/tls.pem` | The device's TLS certificate (N16R8 build; see [TLS](#tls)) | public |
 
 ---
 
@@ -378,6 +407,7 @@ All methods use **JSON-RPC 2.0**. No access token is needed unless authenticatio
 |---|---|---|
 | **Streamable HTTP** (MCP standard) | `POST http://<IP>/mcp` | Standard MCP clients: Claude Code, Claude Desktop through `mcp-remote`, the MCP Inspector, the official SDKs |
 | WebSocket (legacy) | `ws://<IP>:9000` | The web dashboard and existing WebSocket clients; supports push notifications (`resources/subscribe`) |
+| Over TLS (ESP32-S3 N16R8) | `https://<IP>/mcp`, `wss://<IP>/ws` | The same two transports, encrypted (see [TLS](#tls)) |
 
 ### Connecting an MCP client
 

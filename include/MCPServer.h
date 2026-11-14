@@ -125,6 +125,11 @@ public:
 
     // Override the transport used for push notifications.
     void setSendFunc(SendFunc fn) { sendFunc_ = fn; }
+    // Clients with ids in [first, last] are served by another push transport
+    // (the TLS WebSocket, issue #23): sendToClient / broadcasts go to `fn`.
+    void setClientSender(uint8_t first, uint8_t last, SendFunc fn) {
+        extraFirst_ = first; extraLast_ = last; extraSender_ = std::move(fn);
+    }
 
     // Register a handler for a custom JSON-RPC method.
     // If method is already registered the old handler is replaced.
@@ -177,6 +182,10 @@ private:
     Implementation serverInfo_{"esp32-mcp-server", "1.0.0"};
     ServerCapabilities capabilities_{true, true};
     SendFunc sendFunc_;
+    SendFunc extraSender_;
+    uint8_t  extraFirst_ = 1, extraLast_ = 0;   // empty range
+    // Route one push to the transport that owns `cid`; false if none can.
+    bool deliver(uint8_t cid, const std::string& msg);
 #ifndef NATIVE_TEST
     GatedWebSocketsServer wsServer_;
     void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length);

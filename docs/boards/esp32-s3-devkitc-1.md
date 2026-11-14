@@ -152,4 +152,4 @@ Measured on an N16R8 during GATT enumeration of a phone: minimum free internal h
 
 ## Security
 
-MCP authentication is off by default; type `auth on` on the serial console to require an access token (it is generated and printed; `token show` prints it again). OTA uses a random per-device password printed at first boot (`ota show`). **There is no TLS on this board:** the token and data travel in clear text, so use it on a trusted network. See [Security](../../README.md#security).
+MCP authentication is off by default; type `auth on` on the serial console to require an access token (it is generated and printed; `token show` prints it again). OTA uses a random per-device password printed at first boot (`ota show`). **TLS:** the N16R8 build (`esp32-s3-devkitc-1-n16r8`) also serves `https://<device>/mcp` and `wss://<device>/ws` with a per-device certificate (`tls show` prints its fingerprint; the PEM is at `http://<device>/tls.pem`). The generic build without PSRAM has no TLS: there the token and data travel in clear text, so use it on a trusted network. See [Security](../../README.md#security).
