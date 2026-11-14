@@ -110,6 +110,19 @@ public:
     // so a new client must not inherit the previous occupant's subscriptions.
     void removeClient(uint8_t clientId);
 
+    // Send a server-initiated message (notification) to one client.  Returns
+    // false when the client cannot receive pushes (HTTP session, unknown).
+    bool sendToClient(uint8_t clientId, const std::string& msg);
+    // Is `clientId` currently admitted (connected and authenticated)?
+    bool hasClient(uint8_t clientId) const { return clients_.count(clientId) > 0; }
+    // Identity of the connection currently in `clientId`'s slot: a new value
+    // every time a client is admitted, 0 when the slot is empty.  Slot numbers
+    // are reused, so state owned by a connection must be keyed on this.
+    uint32_t clientGeneration(uint8_t clientId) const {
+        auto it = clients_.find(clientId);
+        return it == clients_.end() ? 0 : it->second.generation;
+    }
+
     // Override the transport used for push notifications.
     void setSendFunc(SendFunc fn) { sendFunc_ = fn; }
 
@@ -172,7 +185,9 @@ private:
     struct ClientState {
         auth::Access      access = auth::Access::None;
         auth::RateLimiter limiter;
+        uint32_t          generation = 0;
     };
+    uint32_t nextGeneration_ = 0;
     std::unordered_map<uint8_t, ClientState> clients_;
     bool              authEnforced_ = false;
     auth::Credentials creds_;

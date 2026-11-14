@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "BLEGattCore.h"
+#include "BLEGattOps.h"
 #include "BLEScannerCore.h"
 
 #ifndef NATIVE_TEST
@@ -156,6 +157,30 @@ public:
     // True while the GATT connection has pending enumeration work.
     bool isServicesBusy() const;
 
+    // --- GATT operations on the connected peer (issue #14) ----------------
+    // All require an open link with no enumeration in progress (state
+    // Connected); they return false otherwise, with a reason in `err`.
+
+    // Snapshot of the last enumeration (with attribute handles).
+    std::vector<BLEServiceInfo> getServices() const;
+
+    // Start a characteristic write.  Poll with getWriteResult().
+    bool writeStart(uint16_t handle, const std::vector<uint8_t>& value,
+                    bool withResponse, std::string& err);
+    enum class WriteState { Idle, Pending, Ok, Failed };
+    // `gattStatus` is the esp_gatt_status_t of a failed write (0 otherwise).
+    WriteState getWriteResult(int& gattStatus) const;
+
+    // Enable / disable notifications (or indications) on one characteristic.
+    // Values then flow into the notification queue.
+    bool subscribe(uint16_t handle, const std::string& uuid, bool indicate, std::string& err);
+    bool unsubscribe(uint16_t handle, std::string& err);
+    std::vector<uint16_t> liveSubscriptions() const;
+
+    // Values notified on subscribed characteristics since the last drain.
+    std::vector<gattops::NotifyEvent> drainNotifications(uint32_t& dropped);
+    bool hasNotifications() const;
+
     // Advertising report callback (invoked by the BLE stack).
     void onAdv(BLEAdvertisedDevice* adv);
 
@@ -233,6 +258,14 @@ private:
     // Notify-capture state (guarded by mutex_).
     std::map<uint16_t, std::string> notifyHandles_;  // handle -> uuid
     std::map<uint16_t, std::string> notifyValues_;   // handle -> latest hex
+    // On-demand subscriptions (issue #14): handle -> uuid, and their values.
+    std::map<uint16_t, std::string> liveSubs_;
+    gattops::NotifyQueue notifyQueue_;
+    // Single in-flight characteristic write.
+    WriteState writeState_ = WriteState::Idle;
+    uint16_t   writeHandle_ = 0;
+    int        writeStatus_ = 0;
+    bool writeCcc(uint16_t handle, uint16_t value);  // CCCD write, lock NOT held
 
     // Helper: lazily create and take/give the shared-state mutex.  The mutex
     // is created on first use because globals may be constructed before the

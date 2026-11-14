@@ -24,6 +24,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   that IP out with `429`.
 
 ### Added
+- **BLE client exposure** — #14
+  - GATT **write** (`ble/write`, with or without response, by handle or UUID) and
+    on-demand **subscribe** (`ble/subscribe` / `ble/unsubscribe`). Values are pushed to
+    WebSocket clients as `notifications/ble/value` or polled with `ble/notifications`.
+    All of these need the full-control token.
+  - `ble/services/results` now includes each characteristic's `handle`.
+  - Tools: `ble_write`, `ble_subscribe`, `ble_unsubscribe`, `ble_notifications`.
+  - `examples/client/client.ts` rewritten as a typed module with BLE helpers and a
+    `MCPError` that carries `code` and `data`. Fixed `listResources` / `readResource`
+    (they read a nonexistent `result.data`) and the heartbeat (now a JSON-RPC `ping`).
+  - `examples/client/ble_example.ts` and the dependency-free Python CLI
+    `examples/client/mcp_ble.py` (Streamable HTTP).
 - **Standard MCP clients can connect** — #13
   - **Streamable HTTP transport** at `POST /mcp` (port 80): sessions via `Mcp-Session-Id`,
     bearer auth, Origin check, `202` for notifications, `DELETE` to end a session. Works

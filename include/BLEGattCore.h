@@ -28,6 +28,13 @@ inline bool gattStateConnected(GattState s) {
            s == GattState::Reading || s == GattState::NotifyWait;
 }
 
+// Should a DISCONNECT_EVT / CLOSE_EVT tear down the current lifecycle?  Not
+// while Idle (nothing to tear down) or Connecting (no link opened yet: the
+// event belongs to the previous link, whose conn_id is often the same 0).
+inline bool linkEventApplies(GattState s) {
+    return gattStateConnected(s) || s == GattState::Closing;
+}
+
 // True while an enumeration started by ble/services/start is still running.
 // `Connected` alone means the enumeration is FINISHED (or never started), so
 // it must not count as busy; it is busy only while a completed discovery is

@@ -1,69 +1,167 @@
-// WebSocket close codes the server uses to refuse a connection (issue #12).
-const WS_CLOSE_UNAUTHORIZED = 4401;
-const WS_CLOSE_TOO_MANY_CLIENTS = 4429;
+// Typed MCP WebSocket client for the ESP32 MCP server, with BLE helpers
+// (issue #14).  Works in browsers and in Node (pass `WebSocketImpl: WebSocket`
+// from the `ws` package to send the token as an Authorization header).
+//
+// See ble_example.ts for a scan -> connect -> enumerate -> subscribe walk-through.
 
-class MCPClient {
-    // options.token          MCP access token (serial console: `token show`).
-    // options.WebSocketImpl  a WebSocket class that accepts request headers,
-    //                        e.g. require('ws') in Node.  When given, the token
-    //                        is sent as `Authorization: Bearer <token>`;
-    //                        otherwise (browsers) it goes in `?token=`.
-    constructor(url, options = {}) {
+// WebSocket close codes the server uses to refuse a connection (issue #12).
+export const WS_CLOSE_UNAUTHORIZED = 4401;
+export const WS_CLOSE_TOO_MANY_CLIENTS = 4429;
+const WS_OPEN = 1;
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+export interface MCPClientOptions {
+    /** MCP access token (serial console: `token show`). */
+    token?: string;
+    /** WebSocket class that accepts `{ headers }` (Node `ws`). */
+    WebSocketImpl?: any;
+    /** Default per-request timeout in ms (default 15000). */
+    timeoutMs?: number;
+}
+
+/** A JSON-RPC error, with the server's structured `code` and `data`. */
+export class MCPError extends Error {
+    constructor(message: string, public code: number, public data?: any) {
+        super(message);
+        this.name = 'MCPError';
+    }
+}
+
+export type BleAddrType = 'public' | 'random' | 'rpa-public' | 'rpa-random';
+
+export interface BleScanOptions {
+    /** Scan length; 0 = continuous until bleStopScan(). Default 5000. */
+    durationMs?: number;
+    /** Capture filters: decide which devices are stored. */
+    minRssi?: number;
+    manufacturerId?: string;
+    serviceUuid?: string;
+    macPrefix?: string;
+}
+
+export interface BleDevice {
+    mac: string;
+    name: string;
+    rssi: number;
+    services: string;
+    manufacturer: string;
+    connectable: boolean;
+    addrType: BleAddrType;
+    /** Distinct payloads retained (payloadHistory may show fewer). */
+    count: number;
+    firstSeen?: number;
+    lastSeen?: number;
+    payloadHistory: string[];
+}
+
+export interface BleScanResults {
+    devices: BleDevice[];
+    /** Devices dropped this scan to stay within the memory plan's limits. */
+    evicted: number;
+    maxDevices: number;
+    durationMs?: number;
+    scanStartedMs?: number;
+}
+
+export interface BlePayload {
+    payload: string;
+    count: number;
+    firstSeen?: number;
+    lastSeen?: number;
+}
+
+export interface BlePayloadRegistry {
+    payloads: BlePayload[];
+    /** Distinct payloads discarded because the registry was full. */
+    dropped: number;
+    scanning?: boolean;
+    durationMs?: number;
+    scanStartedMs?: number;
+}
+
+export interface BleCharacteristic {
+    handle: number;
+    uuid: string;
+    /** Comma-separated: read,write,write-no-response,notify,indicate,... */
+    properties: string;
+    valueHex?: string;
+    valueText?: string;
+}
+
+export interface BleService {
+    uuid: string;
+    characteristics: BleCharacteristic[];
+}
+
+/** A characteristic by handle (preferred) or by UUID if unique. */
+export type BleCharTarget = { handle: number } | { uuid: string };
+
+export interface BleNotification {
+    handle: number;
+    uuid: string;
+    valueHex: string;
+    valueText: string;
+    ts: number;
+    dropped?: number;
+}
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+// ---------------------------------------------------------------------------
+// Client
+// ---------------------------------------------------------------------------
+
+export class MCPClient {
+    private url: string;
+    private token: string;
+    private WebSocketImpl: any;
+    private timeoutMs: number;
+    private ws: any = null;
+    private requestId = 1;
+    private callbacks = new Map<number, { resolve: (m: any) => void; reject: (e: Error) => void }>();
+    private subscriptions = new Map<string, (data: any) => void>();
+    private bleListeners = new Map<number, (n: BleNotification) => void>();
+    private heartbeat: any = null;
+
+    constructor(url: string, options: MCPClientOptions = {}) {
         this.url = url;
         this.token = options.token || '';
         this.WebSocketImpl = options.WebSocketImpl || null;
-        this.ws = null;
-        this.requestId = 1;
-        this.callbacks = new Map();
-        this.subscriptions = new Map();
-        this.reconnectAttempts = 0;
-        this.maxReconnectAttempts = 5;
-        this.reconnectDelay = 1000;
-        this.heartbeatInterval = null;
+        this.timeoutMs = options.timeoutMs || 15000;
     }
-    
-    connect() {
+
+    connect(): Promise<any> {
         return new Promise((resolve, reject) => {
             this.ws = this.openSocket();
-            
             this.ws.onopen = () => {
-                console.log('Connected to MCP server');
-                this.reconnectAttempts = 0;
                 this.startHeartbeat();
                 this.initialize().then(resolve).catch(reject);
             };
-            
-            this.ws.onmessage = (event) => {
+            this.ws.onmessage = (event: any) => {
                 try {
-                    const message = JSON.parse(event.data);
-                    this.handleMessage(message);
+                    this.handleMessage(JSON.parse(String(event.data)));
                 } catch (error) {
                     console.error('Error parsing message:', error);
                 }
             };
-            
-            this.ws.onclose = (event) => {
-                console.log('Connection closed', event && event.code);
+            this.ws.onclose = (event: any) => {
                 this.stopHeartbeat();
+                for (const { reject: rj } of this.callbacks.values()) rj(new Error('Connection closed'));
+                this.callbacks.clear();
                 if (event && event.code === WS_CLOSE_UNAUTHORIZED) {
-                    // Retrying with the same token cannot succeed.
                     reject(new Error('MCP server rejected the access token (4401)'));
-                    return;
+                } else if (event && event.code === WS_CLOSE_TOO_MANY_CLIENTS) {
+                    reject(new Error('MCP server is at its client limit (4429)'));
                 }
-                if (event && event.code === WS_CLOSE_TOO_MANY_CLIENTS) {
-                    console.log('Server is at its client limit; retrying');
-                }
-                this.handleReconnect();
             };
-            
-            this.ws.onerror = (error) => {
-                console.error('WebSocket error:', error);
-                reject(error);
-            };
+            this.ws.onerror = (error: any) => reject(error);
         });
     }
-    
-    openSocket() {
+
+    private openSocket(): any {
         if (this.WebSocketImpl) {
             const headers = this.token ? { Authorization: `Bearer ${this.token}` } : {};
             return new this.WebSocketImpl(this.url, { headers });
@@ -73,156 +171,197 @@ class MCPClient {
         return new WebSocket(`${this.url}${sep}token=${encodeURIComponent(this.token)}`);
     }
 
-    disconnect() {
-        if (this.ws) {
-            this.ws.close();
-            this.stopHeartbeat();
-        }
+    disconnect(): void {
+        this.stopHeartbeat();
+        if (this.ws) this.ws.close();
     }
-    
-    async initialize() {
-        const response = await this.sendRequest('initialize', {});
-        console.log('Server initialized:', response);
-        return response;
-    }
-    
-    async listResources() {
-        const response = await this.sendRequest('resources/list', {});
-        return response.result.data.resources;
-    }
-    
-    async readResource(uri) {
-        const response = await this.sendRequest('resources/read', { uri });
-        return response.result.data;
-    }
-    
-    async subscribe(uri, callback) {
-        const response = await this.sendRequest('resources/subscribe', { uri });
-        if (response.result.success) {
-            this.subscriptions.set(uri, callback);
-        }
-        return response.result.success;
-    }
-    
-    async unsubscribe(uri) {
-        const response = await this.sendRequest('resources/unsubscribe', { uri });
-        if (response.result.success) {
-            this.subscriptions.delete(uri);
-        }
-        return response.result.success;
-    }
-    
-    sendRequest(method, params) {
+
+    // --- JSON-RPC -------------------------------------------------------------
+
+    /** Send a request; resolves with `result`, rejects with MCPError. */
+    request<T = any>(method: string, params: object = {}, timeoutMs = this.timeoutMs): Promise<T> {
         return new Promise((resolve, reject) => {
-            if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+            if (!this.ws || this.ws.readyState !== WS_OPEN) {
                 reject(new Error('WebSocket is not connected'));
                 return;
             }
-            
             const id = this.requestId++;
-            const request = {
-                jsonrpc: '2.0',
-                method: method,
-                params: params,
-                id: id
-            };
-            
-            this.callbacks.set(id, { resolve, reject });
-            this.ws.send(JSON.stringify(request));
-            
-            // Set timeout for request
-            setTimeout(() => {
-                if (this.callbacks.has(id)) {
-                    this.callbacks.delete(id);
-                    reject(new Error('Request timeout'));
-                }
-            }, 5000);
+            const timer = setTimeout(() => {
+                if (this.callbacks.delete(id)) reject(new Error(`${method}: request timeout`));
+            }, timeoutMs);
+            this.callbacks.set(id, {
+                resolve: (msg) => { clearTimeout(timer); resolve(msg.result as T); },
+                reject: (err) => { clearTimeout(timer); reject(err); },
+            });
+            this.ws.send(JSON.stringify({ jsonrpc: '2.0', method, params, id }));
         });
     }
-    
-    handleMessage(message) {
-        // Handle notifications
-        if (message.method && message.method.startsWith('notifications/')) {
+
+    private handleMessage(message: any): void {
+        if (message.method && message.id === undefined) {
             this.handleNotification(message);
             return;
         }
-        
-        // Handle responses
-        if (message.id && this.callbacks.has(message.id)) {
-            const { resolve, reject } = this.callbacks.get(message.id);
-            this.callbacks.delete(message.id);
-            
-            if (message.error) {
-                reject(new Error(message.error.message));
-            } else {
-                resolve(message);
-            }
+        const cb = this.callbacks.get(message.id);
+        if (!cb) return;
+        this.callbacks.delete(message.id);
+        if (message.error) {
+            cb.reject(new MCPError(message.error.message, message.error.code, message.error.data));
+        } else {
+            cb.resolve(message);
         }
     }
-    
-    handleNotification(message) {
+
+    private handleNotification(message: any): void {
         if (message.method === 'notifications/resources/updated') {
-            const uri = message.params.uri;
-            const callback = this.subscriptions.get(uri);
-            if (callback) {
-                this.readResource(uri).then(callback);
-            }
+            const cb = this.subscriptions.get(message.params.uri);
+            if (cb) this.readResource(message.params.uri).then(cb);
+        } else if (message.method === 'notifications/ble/value') {
+            const cb = this.bleListeners.get(message.params.handle);
+            if (cb) cb(message.params as BleNotification);
         }
     }
-    
-    handleReconnect() {
-        if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-            console.error('Max reconnection attempts reached');
-            return;
-        }
-        
-        this.reconnectAttempts++;
-        const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1);
-        
-        console.log(`Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`);
-        setTimeout(() => this.connect(), delay);
-    }
-    
-    startHeartbeat() {
-        this.heartbeatInterval = setInterval(() => {
-            if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-                this.ws.send(JSON.stringify({ type: 'ping' }));
-            }
+
+    private startHeartbeat(): void {
+        this.heartbeat = setInterval(() => {
+            this.request('ping', {}, 5000).catch(() => { /* server heartbeat handles dead links */ });
         }, 30000);
     }
-    
-    stopHeartbeat() {
-        if (this.heartbeatInterval) {
-            clearInterval(this.heartbeatInterval);
-            this.heartbeatInterval = null;
+
+    private stopHeartbeat(): void {
+        if (this.heartbeat) clearInterval(this.heartbeat);
+        this.heartbeat = null;
+    }
+
+    // --- MCP basics -------------------------------------------------------------
+
+    initialize(): Promise<any> {
+        return this.request('initialize', {
+            protocolVersion: '2025-06-18',
+            capabilities: {},
+            clientInfo: { name: 'esp32-mcp-client.ts', version: '1.0.0' },
+        });
+    }
+
+    async listResources(): Promise<any[]> {
+        return (await this.request('resources/list')).resources;
+    }
+
+    async readResource(uri: string): Promise<any> {
+        return this.request('resources/read', { uri });
+    }
+
+    async subscribe(uri: string, callback: (data: any) => void): Promise<void> {
+        await this.request('resources/subscribe', { uri });
+        this.subscriptions.set(uri, callback);
+    }
+
+    async unsubscribe(uri: string): Promise<void> {
+        await this.request('resources/unsubscribe', { uri });
+        this.subscriptions.delete(uri);
+    }
+
+    async listTools(): Promise<any[]> {
+        return (await this.request('tools/list')).tools;
+    }
+
+    callTool(name: string, args: object = {}): Promise<any> {
+        return this.request('tools/call', { name, arguments: args });
+    }
+
+    // --- BLE (ESP32-S3 builds) ----------------------------------------------------
+
+    /** Start a background scan (fails if one is already running). */
+    bleScan(options: BleScanOptions = {}): Promise<{ started: boolean; scanning: boolean }> {
+        return this.request('ble/scan', options);
+    }
+
+    /** Start a timed scan, wait for it to finish, and return the devices. */
+    async bleScanAndCollect(options: BleScanOptions = {}): Promise<BleScanResults> {
+        const durationMs = options.durationMs ?? 5000;
+        if (durationMs === 0) throw new Error('bleScanAndCollect needs a finite durationMs');
+        await this.bleScan({ ...options, durationMs });
+        await sleep(durationMs + 200);
+        return this.bleDevices();
+    }
+
+    /** Stop the scan (if running) and return the captured devices. */
+    bleDevices(filter: { mac?: string; serviceUuid?: string; manufacturerId?: string;
+                         macPrefix?: string } = {}): Promise<BleScanResults> {
+        return this.request('ble/scan/results', filter);
+    }
+
+    /** Stop the scan and return the MAC-independent payload registry. */
+    blePayloads(): Promise<BlePayloadRegistry> {
+        return this.request('ble/scan/payloads');
+    }
+
+    /** Payload registry WITHOUT stopping the scan. */
+    blePoll(): Promise<BlePayloadRegistry> {
+        return this.request('ble/scan/poll');
+    }
+
+    bleStopScan(): Promise<{ ok: boolean }> {
+        return this.request('ble/scan/stop');
+    }
+
+    /** Connect and wait until the link is up (throws if it does not come up). */
+    async bleConnect(mac: string, options: { addrType?: BleAddrType; timeoutMs?: number } = {}):
+        Promise<{ connected: true; addrType: BleAddrType }> {
+        const timeoutMs = options.timeoutMs ?? 5000;
+        const started = await this.request('ble/connect', { mac, ...options, timeoutMs });
+        const deadline = Date.now() + timeoutMs + 1000;
+        for (;;) {
+            const st = await this.request('ble/connect/results');
+            if (st.connected) return { connected: true, addrType: started.addrType };
+            if (!st.connecting || Date.now() > deadline) {
+                throw new Error(`BLE connect to ${mac} failed (try addrType "random" for phones and most sensors)`);
+            }
+            await sleep(200);
         }
     }
-}
 
-// Example usage:
-async function connectToMCP() {
-    // Browser: token goes in ?token=.  Node: pass { WebSocketImpl: require('ws') }
-    // to send it as an Authorization header instead.
-    const client = new MCPClient('ws://your-esp32-ip:9000', { token: 'your-mcp-token' });
-    
-    try {
-        // Connect and initialize
-        await client.connect();
-        
-        // List available resources
-        const resources = await client.listResources();
-        console.log('Available resources:', resources);
-        
-        // Subscribe to system info updates
-        await client.subscribe('system://info', (data) => {
-            console.log('System info updated:', data);
-        });
-        
-        // Read current network status
-        const networkStatus = await client.readResource('system://network');
-        console.log('Network status:', networkStatus);
-        
-    } catch (error) {
-        console.error('Error:', error);
+    /** Enumerate services and characteristics (with handles) of the connected device. */
+    async bleEnumerate(options: { notifyCaptureMs?: number } = {}): Promise<BleService[]> {
+        await this.request('ble/services/start');
+        const capture = options.notifyCaptureMs ?? 3000;
+        const res = await this.request('ble/services/results', { notifyCaptureMs: capture },
+                                       capture + 12000);
+        return res.services as BleService[];
+    }
+
+    /** Write hex bytes to a characteristic (full-control token required). */
+    bleWrite(target: BleCharTarget, valueHex: string,
+             options: { withResponse?: boolean; timeoutMs?: number } = {}):
+        Promise<{ ok: true; handle: number; uuid: string; bytes: number }> {
+        return this.request('ble/write', { ...target, value: valueHex, ...options },
+                            (options.timeoutMs ?? 2000) + 3000);
+    }
+
+    /**
+     * Enable notifications/indications and receive values via `onValue`
+     * (pushed over the WebSocket as notifications/ble/value).
+     */
+    async bleSubscribe(target: BleCharTarget, onValue: (n: BleNotification) => void,
+                       options: { indicate?: boolean } = {}):
+        Promise<{ handle: number; uuid: string; mode: 'notify' | 'indicate' }> {
+        const res = await this.request('ble/subscribe', { ...target, ...options });
+        this.bleListeners.set(res.handle, onValue);
+        return res;
+    }
+
+    async bleUnsubscribe(target: BleCharTarget): Promise<void> {
+        const res = await this.request('ble/unsubscribe', target);
+        this.bleListeners.delete(res.handle);
+    }
+
+    /** Values queued since the last call (for when pushes were missed). */
+    bleNotifications(): Promise<{ values: BleNotification[]; dropped: number;
+                                  subscriptions: number[]; connected: boolean }> {
+        return this.request('ble/notifications');
+    }
+
+    bleDisconnect(): Promise<{ ok: boolean }> {
+        return this.request('ble/disconnect');
     }
 }
