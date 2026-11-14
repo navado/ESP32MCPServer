@@ -13,6 +13,7 @@
 #include <BLEAdvertisedDevice.h>
 #include <BLEScan.h>
 #include <esp_gattc_api.h>
+#include <esp_gap_ble_api.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
@@ -195,8 +196,38 @@ public:
     // Advertising report callback (invoked by the BLE stack).
     void onAdv(BLEAdvertisedDevice* adv);
 
+    // One advertising report, from either scanner (legacy BLEScan callback or
+    // the BLE 5 extended scan, issue #25).
+    struct AdvInput {
+        std::string    mac;
+        uint8_t        addrType = 0;
+        int            rssi = 0;
+        const uint8_t* raw = nullptr;
+        size_t         rawLen = 0;
+        bool           connectable = true;
+        blecore::AdvFields fields;
+        bool           extended = false;
+        uint8_t        primaryPhy = 1;
+        uint8_t        secondaryPhy = 0;
+    };
+    void ingestAdv(const AdvInput& in);
+
+    // True when built with BLE_EXT_SCAN=1 (extended scanning and connects).
+    static constexpr bool extendedScan() {
+#if BLE_EXT_SCAN
+        return true;
+#else
+        return false;
+#endif
+    }
+
     // Scan completion hook (BLE stack callback, non-blocking start()).
     static void onScanCompleteStatic(BLEScanResults results);
+
+#if BLE_EXT_SCAN && !defined(NATIVE_TEST)
+    // GAP events for the extended scanner (chained via setCustomGapHandler).
+    void onGapEvent(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* param);
+#endif
 
     // Bluedroid GATT client event — invoked from the BLE library's registered
     // handler (chained in begin()).  Must not call controller APIs; it only
@@ -278,6 +309,9 @@ private:
     // On-demand subscriptions (issue #14): handle -> uuid, and their values.
     std::map<uint16_t, std::string> liveSubs_;
     gattops::NotifyQueue notifyQueue_;
+    // Extended-report reassembly (BLE_EXT_SCAN; guarded by mutex_).
+    std::string extFrag_;
+    std::string extFragMac_;
     // Single in-flight characteristic write.
     WriteState writeState_ = WriteState::Idle;
     uint16_t   writeHandle_ = 0;

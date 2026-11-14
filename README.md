@@ -751,7 +751,9 @@ The ESP32-S3 acts as a **BLE central** controlled over MCP: it captures what nea
 
 **MTU.** After connecting, the device asks for an ATT MTU of 517 and reports the negotiated value as `mtu` in `ble/connect/results`. The exchange completes a few seconds after the link opens, and the MTU is 23 until then. Writes with a response can be up to 512 bytes; longer than MTU − 3, they are sent as a long write. A write without a response must fit in MTU − 3 bytes, otherwise it gets `-32602` with `data.mtu` and `data.maxBytes`.
 
-**Not supported (yet):** descriptor writes other than the CCCD; pairing/bonding (encrypted characteristics fail to read or write); more than one connection at a time; BLE 5 extended advertising and Coded PHY (only legacy advertising is received); and acting as a peripheral/advertiser.
+**BLE 5 extended advertising.** The S3 builds scan with the BLE 5 extended scanner (`BLE_EXT_SCAN=1`, the default; build with `-D BLE_EXT_SCAN=0` for the legacy scanner). It listens on both the 1M and the Coded PHY and receives legacy and extended advertisements alike. A device seen with extended advertising gets `"extended": true`, plus `phy` (primary) and `secondaryPhy` (`1M`, `2M` or `coded`) in `ble/scan/results`. Extended advertising data up to 1650 bytes is reassembled; the name, services and manufacturer data are parsed from all of it, and each `payloadHistory` entry keeps the first 64 bytes. With extended scanning, connects use the extended create-connection on the 1M PHY. The controller doesn't allow legacy and extended commands to be mixed.
+
+**Not supported (yet):** descriptor writes other than the CCCD; pairing/bonding (encrypted characteristics fail to read or write); more than one connection at a time; and acting as a peripheral/advertiser.
 
 **Verified on hardware** (ESP32-S3-DevKitC-1 N16R8) against an nRF52840 peripheral (random static address), an Android phone (rotating random address) and a BlueZ peripheral (public address): connect median 0.43 s (15/15), 47 connect/disconnect cycles with clean teardown on the peer, full enumeration of a phone (7 services / 37 characteristics) with ≥ 49 KB internal heap free throughout.
 

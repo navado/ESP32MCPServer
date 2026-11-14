@@ -29,6 +29,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   that IP out with `429`.
 
 ### Added
+- **BLE 5 extended advertising on the S3** — #25. The scanner uses the extended scan API on
+  1M + Coded PHY (`BLE_EXT_SCAN=1`, the default for the S3 envs), so extended-only advertisers
+  show up next to legacy ones; reports carry `extended`, `phy` and `secondaryPhy`. Connects
+  use the extended create-connection. `-D BLE_EXT_SCAN=0` restores the legacy scanner.
 - **GATT values beyond 64 bytes, MTU negotiation** — #26
   - Each link asks for an ATT MTU of 517; `ble/connect/results` reports `mtu`.
   - Reads keep up to 512 bytes per value with PSRAM, 128 without (the memory plan's new

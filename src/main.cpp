@@ -962,6 +962,11 @@ void setup() {
                     o["manufacturer"] = r.manufacturer;
                     o["connectable"]  = r.isConnectable;
                     o["addrType"]     = mcp::blecore::addrTypeName(r.addrType);
+                    if (r.extended) {
+                        o["extended"] = true;
+                        o["phy"] = mcp::blecore::phyName(r.primaryPhy);
+                        o["secondaryPhy"] = mcp::blecore::phyName(r.secondaryPhy);
+                    }
                     o["count"]        = r.count;
                     if (r.firstSeen != 0) o["firstSeen"] = r.firstSeen;
                     if (r.lastSeen != 0) o["lastSeen"] = r.lastSeen;
@@ -992,6 +997,11 @@ void setup() {
                 o["manufacturer"] = r.manufacturer;
                 o["connectable"]  = r.isConnectable;
                 o["addrType"]     = mcp::blecore::addrTypeName(r.addrType);
+                    if (r.extended) {
+                        o["extended"] = true;
+                        o["phy"] = mcp::blecore::phyName(r.primaryPhy);
+                        o["secondaryPhy"] = mcp::blecore::phyName(r.secondaryPhy);
+                    }
                 o["count"]        = r.count;
                 if (r.firstSeen != 0) o["firstSeen"] = r.firstSeen;
                 if (r.lastSeen != 0) o["lastSeen"] = r.lastSeen;
