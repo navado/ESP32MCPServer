@@ -751,7 +751,7 @@ The ESP32-S3 acts as a **BLE central** controlled over MCP: it captures what nea
 | `ble/scan/payloads` | — | Stop the scan and return the **MAC-independent payload registry**: distinct payloads across ALL broadcasters, first-seen order, with `count` + `firstSeen`/`lastSeen` (ms since scan start), plus `dropped`: distinct payloads discarded because the registry (64 entries) was full. The primary artifact for protocol reverse-engineering — survives per-MAC MAC-rotation churn |
 | `ble/scan/poll` | — | Live read of the payload registry WITHOUT stopping the scan (stateless; diff by `firstSeen`) |
 | `ble/scan/stop` | — | Stop a continuous scan early |
-| `ble/connect` | `mac`, `timeoutMs?`, `addrType?` | Begin an **asynchronous** GATT connect to a peer MAC (default timeout 5000 ms). `addrType` is `public`, `random`, `rpa-public` or `rpa-random`; when omitted, the type recorded by the last scan for that MAC is used (public if it was not seen). Most phones, watches and sensors use random addresses and cannot be opened as public. A malformed `mac` is `-32602`; a link that is already connecting, connected, enumerating or closing (or an OTA in progress) is `-32010` with the GATT `state` and `resolve: "ble/disconnect"` |
+| `ble/connect` | `mac`, `timeoutMs?`, `addrType?` | Begin an **asynchronous** GATT connect to a peer MAC (default timeout 10000 ms; a peripheral that advertises about once a second, like a BlueZ default, often needs 5–10 s). `addrType` is `public`, `random`, `rpa-public` or `rpa-random`; when omitted, the type recorded by the last scan for that MAC is used (public if it was not seen). Most phones, watches and sensors use random addresses and cannot be opened as public. A malformed `mac` is `-32602`; a link that is already connecting, connected, enumerating or closing (or an OTA in progress) is `-32010` with the GATT `state` and `resolve: "ble/disconnect"` |
 | `ble/connect/results` | — | Poll the outcome of the last async connect |
 | `ble/disconnect` | — | Drop the GATT link |
 | `ble/services/start` | — | Enumerate services/characteristics (background task); returns immediately. Not connected (or still connecting / closing): `-32013 Feature not ready` with `resolve`; an enumeration already running: `-32010` with `resolve: "ble/services/results"` |
@@ -801,7 +801,7 @@ Notes for reverse engineering:
 #### `ble/connect` / `ble/connect/results` / `ble/services/*`
 
 ```json
-{"jsonrpc":"2.0","method":"ble/connect","id":16,"params":{"mac":"00:1b:66:c6:da:c8","timeoutMs":5000}}
+{"jsonrpc":"2.0","method":"ble/connect","id":16,"params":{"mac":"00:1b:66:c6:da:c8","timeoutMs":10000}}
 ```
 ```json
 {"jsonrpc":"2.0","id":16,"result":{"started":true,"connecting":true,"connected":false,"addrType":"public"}}

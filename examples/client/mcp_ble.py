@@ -137,7 +137,7 @@ class McpHttpClient:
     def ble_payloads(self):
         return self.request("ble/scan/payloads")
 
-    def ble_connect(self, mac, addr_type=None, timeout_ms=5000, attempts=2):
+    def ble_connect(self, mac, addr_type=None, timeout_ms=10000, attempts=2):
         """Connect and wait for the link.  BLE connects fail now and then
         (radio, peer busy re-advertising), so one retry is made by default."""
         params = {"mac": mac, "timeoutMs": timeout_ms}

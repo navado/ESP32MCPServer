@@ -77,6 +77,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `partitions_4mb_ota.csv` with 1.81 MB OTA slots for 4 MB ESP32 boards — #9.
 
 ### Changed
+- `ble/connect` waits up to 10 s by default (was 5 s), and so do the example clients. Slow
+  advertisers often need 5–10 s to connect — #27.
 - **`ble/*` failure results are now JSON-RPC errors** — #15. `ble/scan` while a scan is
   running returns `-32010` (with `retryAfterMs`) instead of `{started:false, remainingMs}`;
   `ble/connect` while busy returns `-32010` instead of `{started:false}`, and a malformed MAC
