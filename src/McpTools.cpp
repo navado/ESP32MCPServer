@@ -70,6 +70,25 @@ const char kBleServicesResults[] = R"J({"type":"object","properties":{
 "notifyCaptureMs":{"type":"integer","minimum":0,"maximum":10000,"default":3000,"description":"How long to collect notified values"}},
 "additionalProperties":false})J";
 
+const char kBleCharRef[] = R"J({"type":"object","properties":{
+"handle":{"type":"integer","minimum":1,"maximum":65535,"description":"Characteristic handle from ble_services_results"},
+"uuid":{"type":"string","description":"Characteristic UUID (if unique on the device)"}},
+"additionalProperties":false})J";
+
+const char kBleWrite[] = R"J({"type":"object","properties":{
+"handle":{"type":"integer","minimum":1,"maximum":65535,"description":"Characteristic handle from ble_services_results"},
+"uuid":{"type":"string","description":"Characteristic UUID (if unique on the device)"},
+"value":{"type":"string","description":"Bytes to write as hex, e.g. \"01ff\" or \"01:ff\" (max 512 bytes)"},
+"withResponse":{"type":"boolean","default":true,"description":"Write request (acknowledged) or write command (no response)"},
+"timeoutMs":{"type":"integer","minimum":1,"maximum":5000,"default":2000}},
+"required":["value"],"additionalProperties":false})J";
+
+const char kBleSubscribe[] = R"J({"type":"object","properties":{
+"handle":{"type":"integer","minimum":1,"maximum":65535,"description":"Characteristic handle from ble_services_results"},
+"uuid":{"type":"string","description":"Characteristic UUID (if unique on the device)"},
+"indicate":{"type":"boolean","description":"Use indications instead of notifications (default: notify when supported)"}},
+"additionalProperties":false})J";
+
 ToolDef tool(const char* name, const char* title, const char* method, const char* schema,
              const char* description, bool readOnly, bool destructive, bool idempotent,
              bool openWorld) {
@@ -144,6 +163,20 @@ void registerMcpTools(MCPServer& s) {
         "and values.", true, false, false, true));
     s.registerTool(tool("ble_services_stop", "Stop GATT session", "ble/services/stop", kEmpty,
         "Unsubscribe from notifications and close the link.", false, false, true, true));
+    s.registerTool(tool("ble_write", "Write BLE characteristic", "ble/write", kBleWrite,
+        "Write bytes to a characteristic of the connected device (by handle or UUID from "
+        "ble_services_results). Changes the state of a third-party device.",
+        false, true, false, true));
+    s.registerTool(tool("ble_subscribe", "Subscribe to BLE characteristic", "ble/subscribe",
+        kBleSubscribe,
+        "Enable notifications or indications on a characteristic. Collect values with "
+        "ble_notifications.", false, false, true, true));
+    s.registerTool(tool("ble_unsubscribe", "Unsubscribe from BLE characteristic",
+        "ble/unsubscribe", kBleCharRef, "Disable notifications on a characteristic.",
+        false, false, true, true));
+    s.registerTool(tool("ble_notifications", "Read BLE notifications", "ble/notifications",
+        kEmpty, "Values notified on subscribed characteristics since the last call.",
+        false, false, false, true));
     s.registerTool(tool("ble_disconnect", "Disconnect BLE device", "ble/disconnect", kEmpty,
         "Drop the GATT connection.", false, false, true, true));
 }

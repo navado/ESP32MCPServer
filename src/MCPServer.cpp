@@ -158,6 +158,8 @@ MCPServer::Admission MCPServer::admitClient(uint8_t clientId,
     ClientState st;
     st.access  = access;
     st.limiter = auth::RateLimiter(rateCapacity_, ratePerSec_);
+    if (++nextGeneration_ == 0) ++nextGeneration_;  // 0 means "no client"
+    st.generation = nextGeneration_;
     clients_[clientId] = st;
     return Admission::Accepted;
 }
@@ -572,6 +574,13 @@ void MCPServer::removeClient(uint8_t clientId) {
 // ---------------------------------------------------------------------------
 // Broadcast
 // ---------------------------------------------------------------------------
+
+bool MCPServer::sendToClient(uint8_t clientId, const std::string& msg) {
+    if (!sendFunc_ || clientId >= MCP_HTTP_CLIENT_BASE) return false;
+    if (authEnforced_ && !hasClient(clientId)) return false;
+    sendFunc_(clientId, msg);
+    return true;
+}
 
 void MCPServer::broadcastResourceUpdate(const std::string& uri) {
     if (!sendFunc_) return;

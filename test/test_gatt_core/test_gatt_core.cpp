@@ -167,6 +167,16 @@ void test_properties_none_empty(void) {
 
 // ---------------------------------------------------------------------------
 
+void test_link_event_ignored_while_reconnecting(void) {
+    TEST_ASSERT_FALSE(linkEventApplies(GattState::Idle));
+    TEST_ASSERT_FALSE(linkEventApplies(GattState::Connecting));
+    TEST_ASSERT_TRUE(linkEventApplies(GattState::Connected));
+    TEST_ASSERT_TRUE(linkEventApplies(GattState::Discovering));
+    TEST_ASSERT_TRUE(linkEventApplies(GattState::Reading));
+    TEST_ASSERT_TRUE(linkEventApplies(GattState::NotifyWait));
+    TEST_ASSERT_TRUE(linkEventApplies(GattState::Closing));
+}
+
 int runUnityTests(void) {
     UNITY_BEGIN();
     RUN_TEST(test_state_idle_not_connected);
@@ -189,6 +199,7 @@ int runUnityTests(void) {
     RUN_TEST(test_enum_finished_or_idle_not_in_progress);
     RUN_TEST(test_notify_capture_clamp_passes_small_values);
     RUN_TEST(test_notify_capture_clamp_caps_large_values);
+    RUN_TEST(test_link_event_ignored_while_reconnecting);
     return UNITY_END();
 }
 
