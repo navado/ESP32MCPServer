@@ -38,7 +38,10 @@ const char* accessName(Access a);
 struct Credentials {
     std::string fullToken;              // empty = not configured
     std::string readToken;              // empty = no read-only token
-    bool        allowUnauthenticated = false;  // MCP_ALLOW_UNAUTHENTICATED lab builds
+    // Is authentication enforced?  The firmware sets this from NVS
+    // ("security"/"auth", default MCP_AUTH_DEFAULT = off); the library
+    // default is the safe one.
+    bool        required = true;
 };
 
 // "Bearer abc" (scheme case-insensitive, surrounding spaces ignored) -> "abc";
@@ -53,7 +56,8 @@ std::string extractQueryToken(const std::string& url);
 bool constantTimeEquals(const std::string& a, const std::string& b);
 
 // Decide the access level of a new connection.  Header wins over query.
-//   no full token configured: allowUnauthenticated ? Full : None
+//   auth not required: Full (any token, or none, is accepted)
+//   no full token configured: None
 //   token == fullToken -> Full; token == readToken -> ReadOnly; else None
 Access authenticate(const Credentials& creds, const std::string& authorizationHeader,
                     const std::string& url);

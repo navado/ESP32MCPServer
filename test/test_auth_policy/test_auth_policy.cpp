@@ -76,17 +76,21 @@ void test_no_read_token_configured(void) {
     TEST_ASSERT_TRUE(authenticate(c, "", "/?token=") == Access::None);
 }
 
-void test_no_token_configured_refuses_unless_lab_build(void) {
+void test_required_with_no_token_configured_refuses(void) {
     Credentials c;
     TEST_ASSERT_TRUE(authenticate(c, "Bearer anything", "/") == Access::None);
-    c.allowUnauthenticated = true;
-    TEST_ASSERT_TRUE(authenticate(c, "", "/") == Access::Full);
+    TEST_ASSERT_TRUE(authenticate(c, "", "/") == Access::None);
 }
 
-void test_lab_flag_does_not_bypass_a_configured_token(void) {
+void test_auth_off_accepts_everyone_with_full_access(void) {
     Credentials c = creds();
-    c.allowUnauthenticated = true;
-    TEST_ASSERT_TRUE(authenticate(c, "", "/") == Access::None);
+    c.required = false;
+    TEST_ASSERT_TRUE(authenticate(c, "", "/") == Access::Full);
+    TEST_ASSERT_TRUE(authenticate(c, "Bearer wrong", "/") == Access::Full);
+    TEST_ASSERT_TRUE(authenticate(c, "", "/?token=read-0123456789abcdef") == Access::Full);
+    Credentials none;
+    none.required = false;
+    TEST_ASSERT_TRUE(authenticate(none, "", "/") == Access::Full);
 }
 
 // --- method authorization -------------------------------------------------------
@@ -253,8 +257,8 @@ int main(int, char**) {
     RUN_TEST(test_full_and_read_tokens);
     RUN_TEST(test_header_wins_over_query);
     RUN_TEST(test_no_read_token_configured);
-    RUN_TEST(test_no_token_configured_refuses_unless_lab_build);
-    RUN_TEST(test_lab_flag_does_not_bypass_a_configured_token);
+    RUN_TEST(test_required_with_no_token_configured_refuses);
+    RUN_TEST(test_auth_off_accepts_everyone_with_full_access);
     RUN_TEST(test_full_access_allows_everything);
     RUN_TEST(test_read_only_whitelist);
     RUN_TEST(test_read_only_denies_state_changes);

@@ -270,33 +270,44 @@ pio run -t upload -e nrf52840-dk
 2. Connect to that AP and open **`http://192.168.4.1`**.
 3. Enter your WiFi credentials and click Save.
 4. The board joins your network and prints its IP address on the serial console.
-5. On first boot the serial console prints a generated **MCP access token** and **OTA password** (shown once; type `token show` / `ota show` on the console to see them again).
-6. Connect an MCP client to **`ws://<IP>:9000`** with the token: header `Authorization: Bearer <token>`, or `ws://<IP>:9000/?token=<token>` from a browser. The dashboard asks for the token once and remembers it. See [Security](#security).
+5. Connect an MCP client to **`ws://<IP>:9000`**. MCP authentication is **off by default**, so the examples below work as-is on a trusted network. To require a token, type `auth on` on the serial console (or build with `-D MCP_AUTH_DEFAULT=1`); see [Security](#security).
+6. On first boot the serial console prints a generated **OTA password** (`ota show` prints it again).
 
 ---
 
 ## Security
 
-The device is meant for a **trusted LAN**. The MCP WebSocket is authenticated; there is no TLS yet (see below).
+The device is meant for a **trusted LAN**. MCP authentication is **optional and off by default**: out of the box any host that can reach the device can use it, exactly as before. Turn it on for anything but a lab bench. There is no TLS yet (see below).
 
-**Threat model.** Without a token, any host that can reach port 9000 could open BLE connections to nearby devices, read sensor, bus and metrics data, clear logs, and tie up the server. Authentication stops an unauthenticated host on the network from doing any of that. It does **not** protect against someone who can sniff the traffic: the token and all data travel in clear text over `ws://`, and the OTA password over plain HTTP Basic Auth. Physical access to the USB serial console is trusted: it can show and change every secret.
+**Turning authentication on or off** (NVS namespace `security`, key `auth`):
 
-**MCP access tokens** (NVS namespace `security`):
+| How | Effect |
+|---|---|
+| Serial console `auth on` | Require a token. A full-control token is generated and printed if none exists. Reboots |
+| Serial console `auth off` | Accept clients without a token again (stored tokens are kept). Reboots |
+| `-D MCP_AUTH_DEFAULT=1` build flag | Ship boards with authentication on (used when the `auth` key is absent) |
+| NVS image | Pre-provision `auth`, `token` and `ro_token` like the WiFi credentials |
+
+When authentication is off every client has full control. Rate limits, the client limit and the Origin check stay active either way.
+
+**Threat model.** With authentication off, any host that can reach port 9000 could open BLE connections to nearby devices, read sensor, bus and metrics data, clear logs, and tie up the server. Turning it on stops an unauthenticated host on the network from doing any of that. It does **not** protect against someone who can sniff the traffic: the token and all data travel in clear text over `ws://`, and the OTA password over plain HTTP Basic Auth. Physical access to the USB serial console is trusted: it can show and change every secret.
+
+**MCP access tokens** (NVS namespace `security`; used only when authentication is on):
 
 | Token | Key | Access |
 |---|---|---|
 | Full control | `token` | Every method |
 | Read-only (optional) | `ro_token` | Observation only, nothing that changes shared state: `initialize`, `resources/*`, `sensors/read`, `metrics/*`, `logs/query`, `bus/history/read`, `bus/history/config/get`, `ble/scan/poll`, `ble/connect/results`. Starting or stopping the shared BLE scan (`ble/scan`, `ble/scan/stop`, `ble/scan/results`, `ble/scan/payloads`), `sensors/i2c/scan` (it writes init commands to devices), `ble/connect`, `ble/services/*`, `ble/disconnect`, `logs/clear`, `bus/history/config/set` and any method not on the list need full control |
 
-- On first boot with no token, a random 128-bit token is generated and printed once on the serial console.
+- When authentication is on and no token exists, a random 128-bit token is generated and printed on the serial console (`token show` prints it again).
 - Clients send it as `Authorization: Bearer <token>` or, from browsers (which cannot set WebSocket headers), as `?token=<token>`.
 - A connection without a valid token is closed with WebSocket close code **4401** before any message is processed. A read-only client calling a full-control method gets `-32020` (`data.required: "full"`).
-- Lab builds can set `-D MCP_ALLOW_UNAUTHENTICATED=1`: with **no token provisioned**, clients are then accepted without one (a provisioned token is still enforced). Never ship this.
 
-**Serial console** (115200 baud; type `help`):
+**Serial console** (115200 baud on UART0; on the ESP32-S3-DevKitC-1 that is the USB port labelled **UART/COM**, not the native USB port; type `help`):
 
 | Command | Effect |
 |---|---|
+| `auth status` / `auth on` / `auth off` | Show / require / stop requiring a token; on and off reboot |
 | `token show` | Print both tokens |
 | `token rotate` / `token set <value>` | New random / chosen (≥ 16 chars) full-control token; reboots to apply |
 | `token ro rotate` / `token ro clear` | New / remove the read-only token; reboots |
