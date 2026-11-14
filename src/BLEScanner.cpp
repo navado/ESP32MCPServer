@@ -104,19 +104,15 @@ static void gattcTrampoline(esp_gattc_cb_event_t event, esp_gatt_if_t gattcIf,
     }
 }
 
-#if BLE_EXT_SCAN
 static void gapTrampoline(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* param) {
     if (g_instance != nullptr) g_instance->onGapEvent(event, param);
 }
-#endif
 
 void BLEScanner::begin() {
     BLEDevice::init("");
     g_instance = this;
     BLEDevice::setCustomGattcHandler(gattcTrampoline);
-#if BLE_EXT_SCAN
-    BLEDevice::setCustomGapHandler(gapTrampoline);
-#endif
+    BLEDevice::setCustomGapHandler(gapTrampoline);   // ext scan + pairing
     // Offer the largest ATT MTU; each link negotiates it after opening (#26).
     esp_ble_gatt_set_local_mtu(gattcore::LOCAL_ATT_MTU);
 }
@@ -441,9 +437,13 @@ void BLEScanner::ingestAdv(const AdvInput& in) {
 // advertisers are still received (as legacy PDUs in extended reports).
 // ---------------------------------------------------------------------------
 
+#endif // BLE_EXT_SCAN
+
 void BLEScanner::onGapEvent(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* param) {
     if (param == nullptr) return;
+    if (onPairingEvent(event, param)) return;
     switch (event) {
+#if BLE_EXT_SCAN
         case ESP_GAP_BLE_EXT_ADV_REPORT_EVT: {
             const esp_ble_gap_ext_adv_reprot_t& r = param->ext_adv_report.params;
             char mac[18];
@@ -491,11 +491,208 @@ void BLEScanner::onGapEvent(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t
             scanning_ = false;
             unlock();
             break;
+#endif
         default:
             break;
     }
 }
-#endif // BLE_EXT_SCAN
+
+
+// ---------------------------------------------------------------------------
+// Pairing and bonding (issue #24)
+//
+// The Arduino library already answers a peer's security request (accept);
+// passkey entry, numeric comparison and completion are handled here.  Bonds
+// (LTK, IRK) are stored in NVS by Bluedroid.
+// ---------------------------------------------------------------------------
+
+static std::string macString(const uint8_t* a) {
+    char m[18];
+    snprintf(m, sizeof(m), "%02x:%02x:%02x:%02x:%02x:%02x", a[0], a[1], a[2], a[3], a[4], a[5]);
+    return m;
+}
+
+bool BLEScanner::startPair(const blesec::PairOptions& opts, std::string& err, bool& existingBond) {
+    lock();
+    if (!connected_ || !hasPeer_) { err = "not connected"; unlock(); return false; }
+    if (pair_.state == blesec::PairState::Pairing &&
+        millis() - pairStartMs_ < blesec::PAIR_TIMEOUT_MS) {
+        err = "pairing in progress"; unlock(); return false;
+    }
+    esp_bd_addr_t peer;
+    memcpy(peer, peerAddr_, 6);
+    const std::string mac = macString(peerAddr_);
+    unlock();
+
+    existingBond = false;
+    for (const auto& b : bondedDevices()) existingBond |= (b.first == mac);
+
+    lock();
+    pairOpts_ = opts;
+    PairStatus fresh;
+    fresh.state = blesec::PairState::Pairing;
+    fresh.existingBond = existingBond;
+    pair_ = fresh;
+    pairStartMs_ = millis();
+    unlock();
+
+    // Security parameters for this pairing (outside the mutex).
+    esp_ble_auth_req_t auth = opts.mitm ? ESP_LE_AUTH_REQ_SC_MITM_BOND : ESP_LE_AUTH_REQ_SC_BOND;
+    esp_ble_io_cap_t iocap = static_cast<esp_ble_io_cap_t>(opts.ioCap);
+    uint8_t keySize = 16;
+    uint8_t keys = ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK;
+    esp_ble_gap_set_security_param(ESP_BLE_SM_AUTHEN_REQ_MODE, &auth, sizeof(auth));
+    esp_ble_gap_set_security_param(ESP_BLE_SM_IOCAP_MODE, &iocap, sizeof(iocap));
+    esp_ble_gap_set_security_param(ESP_BLE_SM_MAX_KEY_SIZE, &keySize, sizeof(keySize));
+    esp_ble_gap_set_security_param(ESP_BLE_SM_SET_INIT_KEY, &keys, sizeof(keys));
+    esp_ble_gap_set_security_param(ESP_BLE_SM_SET_RSP_KEY, &keys, sizeof(keys));
+    if (opts.hasPasskey &&
+        (opts.ioCap == blesec::IoCap::DisplayOnly || opts.ioCap == blesec::IoCap::KeyboardDisplay)) {
+        uint32_t pk = opts.passkey;   // we show this; the peer types it
+        esp_ble_gap_set_security_param(ESP_BLE_SM_SET_STATIC_PASSKEY, &pk, sizeof(pk));
+    }
+    if (esp_ble_set_encryption(peer, opts.mitm ? ESP_BLE_SEC_ENCRYPT_MITM : ESP_BLE_SEC_ENCRYPT) != ESP_OK) {
+        lock();
+        pair_.state = blesec::PairState::Failed;
+        unlock();
+        err = "controller rejected the request";
+        return false;
+    }
+    return true;
+}
+
+BLEScanner::PairStatus BLEScanner::pairStatus() const {
+    lock();
+    PairStatus s = pair_;
+    if (s.state == blesec::PairState::Pairing &&
+        millis() - pairStartMs_ >= blesec::PAIR_TIMEOUT_MS) {
+        s.state = blesec::PairState::Failed;
+        s.timedOut = true;
+    }
+    unlock();
+    return s;
+}
+
+bool BLEScanner::answerPasskey(uint32_t passkey, std::string& err) {
+    lock();
+    if (pair_.state != blesec::PairState::Pairing || !pair_.needsPasskey || !hasPeer_) {
+        err = "no passkey request pending";
+        unlock();
+        return false;
+    }
+    pair_.needsPasskey = false;
+    esp_bd_addr_t peer;
+    memcpy(peer, peerAddr_, 6);
+    unlock();
+    esp_ble_passkey_reply(peer, true, passkey);
+    return true;
+}
+
+bool BLEScanner::answerConfirm(bool accept, std::string& err) {
+    lock();
+    if (pair_.state != blesec::PairState::Pairing || !pair_.needsConfirm || !hasPeer_) {
+        err = "no numeric comparison pending";
+        unlock();
+        return false;
+    }
+    pair_.needsConfirm = false;
+    esp_bd_addr_t peer;
+    memcpy(peer, peerAddr_, 6);
+    unlock();
+    esp_ble_confirm_reply(peer, accept);
+    return true;
+}
+
+std::vector<std::pair<std::string, uint8_t>> BLEScanner::bondedDevices() const {
+    std::vector<std::pair<std::string, uint8_t>> out;
+    int n = esp_ble_get_bond_device_num();
+    if (n <= 0) return out;
+    if (n > 32) n = 32;
+    std::vector<esp_ble_bond_dev_t> list(static_cast<size_t>(n));
+    if (esp_ble_get_bond_device_list(&n, list.data()) != ESP_OK) return out;
+    for (int i = 0; i < n; ++i) {
+        const auto& d = list[static_cast<size_t>(i)];
+        // The bond key info carries the identity address type when the peer
+        // distributed its IRK; otherwise report the key mask only.
+        out.emplace_back(macString(d.bd_addr), d.bond_key.pid_key.addr_type);
+    }
+    return out;
+}
+
+int BLEScanner::removeBonds(const std::string& mac) {
+    int n = esp_ble_get_bond_device_num();
+    if (n <= 0) return 0;
+    if (n > 32) n = 32;
+    std::vector<esp_ble_bond_dev_t> list(static_cast<size_t>(n));
+    if (esp_ble_get_bond_device_list(&n, list.data()) != ESP_OK) return 0;
+    int removed = 0;
+    for (int i = 0; i < n; ++i) {
+        auto& d = list[static_cast<size_t>(i)];
+        if (!mac.empty() && macString(d.bd_addr) != mac) continue;
+        if (esp_ble_remove_bond_device(d.bd_addr) == ESP_OK) ++removed;
+    }
+    return removed;
+}
+
+// Returns true when the event was a pairing event (handled here).
+bool BLEScanner::onPairingEvent(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* param) {
+    switch (event) {
+        case ESP_GAP_BLE_PASSKEY_REQ_EVT: {
+            // The peer displays a passkey and we must enter it: use the one
+            // given to ble/pair, or wait for ble/pair/passkey (SMP allows 30 s).
+            lock();
+            const bool have = pairOpts_.hasPasskey;
+            const uint32_t pk = pairOpts_.passkey;
+            if (!have) pair_.needsPasskey = true;
+            unlock();
+            if (have) esp_ble_passkey_reply(param->ble_security.ble_req.bd_addr, true, pk);
+            return true;
+        }
+        case ESP_GAP_BLE_NC_REQ_EVT: {
+            // Numeric comparison: accept now if ble/pair said confirm:true,
+            // else wait for ble/pair/confirm after the user compared values.
+            lock();
+            pair_.hasCompareValue = true;
+            pair_.compareValue = param->ble_security.key_notif.passkey;
+            const bool ok = pairOpts_.confirm;
+            if (!ok) pair_.needsConfirm = true;
+            unlock();
+            if (ok) esp_ble_confirm_reply(param->ble_security.ble_req.bd_addr, true);
+            return true;
+        }
+        case ESP_GAP_BLE_PASSKEY_NOTIF_EVT: {
+            // We display a passkey for the user to type on the peer.
+            lock();
+            pair_.hasDisplayPasskey = true;
+            pair_.displayPasskey = param->ble_security.key_notif.passkey;
+            unlock();
+            return true;
+        }
+        case ESP_GAP_BLE_AUTH_CMPL_EVT: {
+            const esp_ble_auth_cmpl_t& c = param->ble_security.auth_cmpl;
+            lock();
+            if (hasPeer_ && memcmp(c.bd_addr, peerAddr_, 6) == 0) {
+                pair_.needsPasskey = false;
+                pair_.needsConfirm = false;
+                if (c.success) {
+                    pair_.state = blesec::PairState::Paired;
+                    pair_.encrypted = true;
+                    pair_.bonded = (c.auth_mode & ESP_LE_AUTH_BOND) != 0;
+                    pair_.authenticated = (c.auth_mode & ESP_LE_AUTH_REQ_MITM) != 0;
+                } else {
+                    pair_.state = blesec::PairState::Failed;
+                    pair_.failReason = c.fail_reason;
+                    pair_.encrypted = false;
+                }
+            }
+            unlock();
+            return true;
+        }
+        default:
+            return false;
+    }
+}
+
 
 // ---------------------------------------------------------------------------
 // GATT client — raw esp_gattc state machine
@@ -540,6 +737,7 @@ bool BLEScanner::connect(const std::string& mac, uint32_t timeoutMs, int addrTyp
     hasPeer_ = true;
     connectTimeoutMs_ = timeoutMs;
     mtu_ = gattcore::DEFAULT_ATT_MTU;
+    pair_ = PairStatus();
     openIssued_ = false;
     // The GATT app registration survives across connections, and registering
     // the same app id again fails with ESP_GATT_ERROR (REG_EVT not OK), which
@@ -942,6 +1140,11 @@ void BLEScanner::onGattcEvent(esp_gattc_cb_event_t event, esp_gatt_if_t gattcIf,
             if (it == pendingReads_.end()) { unlock(); break; }
             std::string uuid = it->second;
             pendingReads_.erase(it);
+            if (param->read.status != ESP_GATT_OK) {
+                for (auto& svc : services_)
+                    for (auto& chr : svc.characteristics)
+                        if (chr.handle == param->read.handle) chr.readError = param->read.status;
+            }
             if (param->read.status == ESP_GATT_OK && param->read.value_len > 0) {
                 // Bluedroid already did a long read (read blob) for values
                 // longer than MTU-1; keep up to the memory plan's cap.
@@ -1048,6 +1251,8 @@ void BLEScanner::onGattcEvent(esp_gattc_cb_event_t event, esp_gatt_if_t gattcIf,
                 connected_ = false;
                 hasPeer_ = false;
                 connId_ = 0;
+                if (pair_.state == blesec::PairState::Pairing) pair_.state = blesec::PairState::Failed;
+                pair_.encrypted = false;
             }
             unlock();
             break;
@@ -1066,6 +1271,8 @@ void BLEScanner::onGattcEvent(esp_gattc_cb_event_t event, esp_gatt_if_t gattcIf,
                 connected_ = false;
                 hasPeer_ = false;
                 connId_ = 0;
+                if (pair_.state == blesec::PairState::Pairing) pair_.state = blesec::PairState::Failed;
+                pair_.encrypted = false;
             }
             unlock();
             break;
