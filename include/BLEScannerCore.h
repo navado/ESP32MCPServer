@@ -49,6 +49,7 @@ struct BLEPayloadEntry {
 
 // One GATT characteristic discovered on a connected device.
 struct BLECharInfo {
+    uint16_t    handle = 0;   // attribute handle (for ble/write, ble/subscribe)
     std::string uuid;
     std::string properties;   // read/write/notify/indicate/...
     std::string valueHex;     // last read / notified value (may be empty)

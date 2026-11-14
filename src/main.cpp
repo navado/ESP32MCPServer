@@ -13,6 +13,29 @@
 #include "BLEScanner.h"
 #include "MemoryPlan.h"
 #include "FeatureModel.h"
+#include "AuthPolicy.h"
+#include "McpHttpTransport.h"
+#include "McpTools.h"
+#include <Preferences.h>
+#include <esp_random.h>
+
+// MCP authentication is OFF unless configured: NVS "security"/"auth" (set
+// with the serial console command `auth on`) or, when that key is absent,
+// this build default.  -D MCP_AUTH_DEFAULT=1 ships boards with auth on.
+#ifndef MCP_AUTH_DEFAULT
+#define MCP_AUTH_DEFAULT 0
+#endif
+// Resource limits for the MCP WebSocket (the library itself allows at most
+// WEBSOCKETS_SERVER_CLIENT_MAX = 5 sockets).
+#ifndef MCP_MAX_CLIENTS
+#define MCP_MAX_CLIENTS 4
+#endif
+#ifndef MCP_RATE_BURST
+#define MCP_RATE_BURST 20       // requests
+#endif
+#ifndef MCP_RATE_PER_SEC
+#define MCP_RATE_PER_SEC 10     // sustained requests per second per client
+#endif
 
 #ifndef BOARD_BUS_HISTORY_HEAP_CAP
 #define BOARD_BUS_HISTORY_HEAP_CAP 0
@@ -122,6 +145,7 @@ ESP32I2CInterface i2cBus;
 SensorManager*    sensorManager = nullptr;
 DiscoveryManager  discoveryManager;
 OTAManager        otaManager;
+mcp::McpHttpTransport mcpHttp(mcpServer);   // Streamable HTTP at /mcp (port 80)
 #if BOARD_HAS_BLE
 mcp::BLEScanner   bleScanner;
 #endif
@@ -135,6 +159,202 @@ static const char* const FEATURES_URI = "device://features";
 static const char* const BLE_UNAVAILABLE_REASON =
     "not built for this board: on 4 MB flash the BLE stack cannot fit alongside "
     "the WebSocket server and OTA";
+#endif
+
+// ---------------------------------------------------------------------------
+// MCP transport credentials (issue #12)
+//
+// NVS namespace "security": "auth" (u8: 1 = clients need a token; absent =
+// MCP_AUTH_DEFAULT), "token" (full control), "ro_token" (read-only,
+// optional).  When auth is on and no token is provisioned, a random 128-bit
+// token is generated and printed on the serial console; afterwards it can be
+// shown or rotated only from the serial console (physical access).
+// ---------------------------------------------------------------------------
+static const char* const SEC_NVS_NAMESPACE = "security";
+static const char* const SEC_KEY_AUTH      = "auth";
+static const char* const SEC_KEY_TOKEN     = "token";
+static const char* const SEC_KEY_RO_TOKEN  = "ro_token";
+static constexpr size_t  MIN_TOKEN_LEN     = 16;
+
+static std::string newToken() {
+    return mcp::auth::generateToken([]() { return esp_random(); }, 16);
+}
+
+static mcp::auth::Credentials loadMcpCredentials() {
+    mcp::auth::Credentials c;
+    Preferences prefs;
+    prefs.begin(SEC_NVS_NAMESPACE, /*readOnly=*/false);
+    c.required  = prefs.getUChar(SEC_KEY_AUTH, MCP_AUTH_DEFAULT ? 1 : 0) != 0;
+    c.fullToken = prefs.getString(SEC_KEY_TOKEN, "").c_str();
+    c.readToken = prefs.getString(SEC_KEY_RO_TOKEN, "").c_str();
+    if (c.required && c.fullToken.empty()) {
+        c.fullToken = newToken();
+        prefs.putString(SEC_KEY_TOKEN, c.fullToken.c_str());
+        Serial.println("[security] ==================================================");
+        Serial.printf ("[security] Generated MCP access token: %s\n", c.fullToken.c_str());
+        Serial.println("[security] Clients must send 'Authorization: Bearer <token>'");
+        Serial.println("[security] or connect to ws://<device>:9000/?token=<token>.");
+        Serial.println("[security] Type 'help' on this console to manage it.");
+        Serial.println("[security] ==================================================");
+    }
+    prefs.end();
+    if (c.required) {
+        Serial.printf("[security] MCP authentication ON (read-only token %s)\n",
+                      c.readToken.empty() ? "not set" : "set");
+    } else {
+        Serial.println("[security] MCP authentication OFF (default): any host on the "
+                       "network can use this device. Type 'auth on' to require a token.");
+    }
+    return c;
+}
+
+static void storeSecret(const char* key, const std::string& value) {
+    Preferences prefs;
+    prefs.begin(SEC_NVS_NAMESPACE, false);
+    if (value.empty()) prefs.remove(key);
+    else               prefs.putString(key, value.c_str());
+    prefs.end();
+}
+
+// Serial console commands.  Credential changes are persisted and applied by
+// rebooting, so no task ever sees half-updated credentials.
+static void handleSerialCommand(const String& line) {
+    String cmd = line;
+    cmd.trim();
+    if (cmd.isEmpty()) return;
+    auto rebootToApply = []() {
+        Serial.println("[security] Saved. Rebooting to apply...");
+        delay(200);
+        ESP.restart();
+    };
+    if (cmd == "help") {
+        Serial.println("Commands:");
+        Serial.println("  auth status           is MCP authentication on?");
+        Serial.println("  auth on               require a token (generated if none; reboots)");
+        Serial.println("  auth off              accept clients without a token (reboots)");
+        Serial.println("  token show            print the MCP tokens");
+        Serial.println("  token rotate          new full-control token (reboots)");
+        Serial.println("  token set <value>     set the full-control token, >= 16 chars (reboots)");
+        Serial.println("  token ro rotate       new read-only token (reboots)");
+        Serial.println("  token ro clear        remove the read-only token (reboots)");
+        Serial.println("  ota show              print the OTA password");
+        Serial.println("  ota rotate            new random OTA password (reboots)");
+        return;
+    }
+    if (cmd == "auth status") {
+        Preferences prefs;
+        prefs.begin(SEC_NVS_NAMESPACE, true);
+        const bool on = prefs.getUChar(SEC_KEY_AUTH, MCP_AUTH_DEFAULT ? 1 : 0) != 0;
+        prefs.end();
+        Serial.printf("[security] MCP authentication %s\n", on ? "ON" : "OFF");
+        return;
+    }
+    if (cmd == "auth on" || cmd == "auth off") {
+        Preferences prefs;
+        prefs.begin(SEC_NVS_NAMESPACE, false);
+        prefs.putUChar(SEC_KEY_AUTH, cmd == "auth on" ? 1 : 0);
+        prefs.end();
+        rebootToApply();   // a token is generated (and printed) on boot if needed
+        return;
+    }
+    if (cmd == "token show") {
+        Preferences prefs;
+        prefs.begin(SEC_NVS_NAMESPACE, true);
+        String full = prefs.getString(SEC_KEY_TOKEN, "");
+        String ro   = prefs.getString(SEC_KEY_RO_TOKEN, "");
+        prefs.end();
+        Serial.printf("[security] full-control token: %s\n", full.isEmpty() ? "(none)" : full.c_str());
+        Serial.printf("[security] read-only token:    %s\n", ro.isEmpty() ? "(none)" : ro.c_str());
+        return;
+    }
+    if (cmd == "token rotate") {
+        std::string t = newToken();
+        storeSecret(SEC_KEY_TOKEN, t);
+        Serial.printf("[security] New full-control token: %s\n", t.c_str());
+        rebootToApply();
+        return;
+    }
+    if (cmd.startsWith("token set ")) {
+        String v = cmd.substring(10);
+        v.trim();
+        if (v.length() < MIN_TOKEN_LEN || v.indexOf(' ') >= 0) {
+            Serial.printf("[security] Token must be at least %u characters, no spaces.\n",
+                          (unsigned)MIN_TOKEN_LEN);
+            return;
+        }
+        storeSecret(SEC_KEY_TOKEN, v.c_str());
+        rebootToApply();
+        return;
+    }
+    if (cmd == "token ro rotate") {
+        std::string t = newToken();
+        storeSecret(SEC_KEY_RO_TOKEN, t);
+        Serial.printf("[security] New read-only token: %s\n", t.c_str());
+        rebootToApply();
+        return;
+    }
+    if (cmd == "token ro clear") {
+        storeSecret(SEC_KEY_RO_TOKEN, "");
+        rebootToApply();
+        return;
+    }
+    if (cmd == "ota show") {
+        Serial.printf("[OTA] user: %s  password: %s\n", OTA_USERNAME, otaManager.getPassword().c_str());
+        return;
+    }
+    if (cmd == "ota rotate") {
+        String p = otaManager.rotatePassword();
+        Serial.printf("[OTA] New password: %s\n", p.c_str());
+        rebootToApply();
+        return;
+    }
+    Serial.printf("Unknown command '%s' (type 'help')\n", cmd.c_str());
+}
+
+#if BOARD_HAS_BLE
+// Client that subscribed to BLE notifications (issue #14).  Values are
+// pushed to it as notifications/ble/value when it is a WebSocket client;
+// otherwise (HTTP session, disconnected) they wait for ble/notifications.
+// The owner is pinned to the connection (generation), not just the reusable
+// slot number, so a later client in the same slot never receives it.
+static int      bleNotifyOwner = -1;
+static uint32_t bleNotifyOwnerGen = 0;
+
+static void pushBleNotifications() {
+    if (bleNotifyOwner < 0) return;
+    const uint8_t owner = static_cast<uint8_t>(bleNotifyOwner);
+    if (mcpServer.clientGeneration(owner) != bleNotifyOwnerGen) {
+        // The subscriber's connection is gone: forget it and discard values
+        // queued for it rather than hand them to whoever connects next.
+        // Also stop the peer notifying, so nothing more is queued for it.
+        bleNotifyOwner = -1;
+        bleNotifyOwnerGen = 0;
+        std::string ignoredErr;
+        for (uint16_t h : bleScanner.liveSubscriptions()) bleScanner.unsubscribe(h, ignoredErr);
+        uint32_t ignored = 0;
+        bleScanner.drainNotifications(ignored);
+        return;
+    }
+    if (owner >= mcp::MCP_HTTP_CLIENT_BASE) return;  // HTTP sessions poll
+    if (mcpServer.clientAccess(owner) != mcp::auth::Access::Full) return;
+    if (!bleScanner.hasNotifications()) return;
+    uint32_t dropped = 0;
+    auto events = bleScanner.drainNotifications(dropped);
+    for (const auto& ev : events) {
+        JsonDocument doc;
+        doc["jsonrpc"] = "2.0";
+        doc["method"]  = "notifications/ble/value";
+        JsonObject p = doc["params"].to<JsonObject>();
+        p["handle"]    = ev.handle;
+        p["uuid"]      = ev.uuid;
+        p["valueHex"]  = ev.valueHex;
+        p["valueText"] = mcp::blecore::hexToAscii(ev.valueHex);
+        p["ts"]        = ev.timestampMs;
+        if (dropped) { p["dropped"] = dropped; dropped = 0; }
+        std::string out; serializeJson(doc, out);
+        mcpServer.sendToClient(static_cast<uint8_t>(bleNotifyOwner), out);
+    }
+}
 #endif
 
 // Task handles
@@ -175,6 +395,10 @@ void mcpTask(void* parameter) {
     uint32_t lastFeatureCheck = 0;
     while (true) {
         mcpServer.handleClient();
+        mcpHttp.pump();
+#if BOARD_HAS_BLE
+        pushBleNotifications();
+#endif
         discoveryManager.update();
         if (millis() - lastFeatureCheck >= 500) {
             lastFeatureCheck = millis();
@@ -201,6 +425,7 @@ static std::string buildServicesResponse(uint32_t id,
         JsonArray chrArr = so["characteristics"].to<JsonArray>();
         for (const auto& chr : svc.characteristics) {
             JsonObject co = chrArr.add<JsonObject>();
+            co["handle"]     = chr.handle;
             co["uuid"]       = chr.uuid;
             co["properties"] = chr.properties;
             if (!chr.valueHex.empty())  co["valueHex"] = chr.valueHex;
@@ -325,6 +550,13 @@ void setup() {
     discoveryManager.begin(discoveryCfg);
     networkManager.setDiscoveryManager(&discoveryManager);
 
+    // MCP credentials are loaded before the network starts so both transports
+    // (WebSocket :9000 and Streamable HTTP /mcp) are authenticated from the
+    // first request.
+    const mcp::auth::Credentials mcpCreds = loadMcpCredentials();
+    mcpHttp.setCredentials(mcpCreds);
+    networkManager.setRouteRegistrar([](AsyncWebServer& web) { mcpHttp.registerRoutes(web); });
+
     // Start network manager
     networkManager.begin();
 
@@ -336,7 +568,11 @@ void setup() {
     Serial.print("Device IP: ");
     Serial.println(networkManager.getIPAddress());
 
-    // Initialize MCP server
+    // Initialize MCP server — authenticated unless this is a lab build with
+    // no token provisioned (see loadMcpCredentials()).
+    mcpServer.setCredentials(mcpCreds);
+    mcpServer.setMaxClients(MCP_MAX_CLIENTS);
+    mcpServer.setRateLimit(MCP_RATE_BURST, MCP_RATE_PER_SEC);
     mcpServer.begin(networkManager.isConnected());
     // Immediately announce MCP capability so LAN listeners learn the server
     // is ready (sensor list is still empty at this point; will be updated
@@ -942,7 +1178,209 @@ void setup() {
             doc["result"]["ok"] = true;
             std::string out; serializeJson(doc, out); return out;
         });
+
+    // --- GATT write / subscribe (issue #14) --------------------------------
+    // Errors use the structured shapes of #15: -32013 not ready, -32010 busy.
+    auto bleErr = [](uint32_t id, int code, const char* message, const std::string& reason,
+                     const char* resolve) -> std::string {
+        JsonDocument doc;
+        doc["jsonrpc"] = "2.0";
+        doc["id"] = id;
+        doc["error"]["code"] = code;
+        doc["error"]["message"] = message;
+        JsonObject data = doc["error"]["data"].to<JsonObject>();
+        data["feature"] = "ble.central.gatt";
+        data["reason"]  = reason;
+        if (resolve) data["resolve"] = resolve;
+        std::string out; serializeJson(doc, out); return out;
+    };
+    auto invalidParams = [](uint32_t id, const std::string& msg) -> std::string {
+        JsonDocument doc;
+        doc["jsonrpc"] = "2.0";
+        doc["id"] = id;
+        doc["error"]["code"] = -32602;
+        doc["error"]["message"] = "Invalid params: " + msg;
+        std::string out; serializeJson(doc, out); return out;
+    };
+    // Resolve params.handle | params.uuid against the last enumeration.
+    // Returns "" and fills `ref`, or an error response.
+    auto resolveChar = [invalidParams, bleErr](uint32_t id, const JsonObject& p,
+                                               mcp::gattops::CharRef& ref) -> std::string {
+        if (otaManager.isUpdating()) {
+            // Same refusal ble/connect gets while a firmware image is written.
+            mcp::features::Decision d;
+            d.kind = mcp::features::Decision::Kind::Busy;
+            d.feature = "ble.central.gatt";
+            d.blockedBy = "ota";
+            d.state = "updating";
+            return mcp::features::busyError(id, d);
+        }
+        if (!bleScanner.isConnected())
+            return bleErr(id, -32013, "Feature not ready", "not connected", "ble/connect");
+        uint16_t handle = p["handle"] | 0u;
+        std::string uuid = p["uuid"] | "";
+        if (handle == 0 && uuid.empty()) return invalidParams(id, "handle or uuid required");
+        auto services = bleScanner.getServices();
+        if (services.empty())
+            return bleErr(id, -32013, "Feature not ready", "services not enumerated",
+                          "ble/services/start");
+        std::vector<uint16_t> candidates;
+        auto r = mcp::gattops::resolveCharacteristic(services, handle, uuid, ref, candidates);
+        if (r == mcp::gattops::Resolve::NotFound)
+            return invalidParams(id, "no such characteristic on the connected device");
+        if (r == mcp::gattops::Resolve::Ambiguous) {
+            JsonDocument doc;
+            doc["jsonrpc"] = "2.0";
+            doc["id"] = id;
+            doc["error"]["code"] = -32602;
+            doc["error"]["message"] = "Invalid params: uuid matches several characteristics; pass handle";
+            JsonArray c = doc["error"]["data"]["handles"].to<JsonArray>();
+            for (uint16_t h : candidates) c.add(h);
+            std::string out; serializeJson(doc, out); return out;
+        }
+        return std::string();
+    };
+
+    // ble/write — write a characteristic value; waits for the write response.
+    mcpServer.registerMethodHandler("ble/write",
+        [resolveChar, invalidParams, bleErr](uint8_t, uint32_t id, const JsonObject& p) -> std::string {
+            mcp::gattops::CharRef ref;
+            std::string e = resolveChar(id, p, ref);
+            if (!e.empty()) return e;
+            std::vector<uint8_t> value;
+            std::string perr;
+            if (!mcp::gattops::parseHexBytes(p["value"] | "", value, perr))
+                return invalidParams(id, "value: " + perr);
+            bool withResponse = p["withResponse"] | true;
+            const char* need = withResponse ? "write" : "write-no-response";
+            if (!mcp::gattops::hasProperty(ref.properties, need)) {
+                JsonDocument doc;
+                doc["jsonrpc"] = "2.0";
+                doc["id"] = id;
+                doc["error"]["code"] = -32602;
+                doc["error"]["message"] = std::string("Invalid params: characteristic does not support ") + need;
+                doc["error"]["data"]["properties"] = ref.properties;
+                std::string out; serializeJson(doc, out); return out;
+            }
+            std::string werr;
+            if (!bleScanner.writeStart(ref.handle, value, withResponse, werr)) {
+                if (werr == "a write is already in progress")
+                    return bleErr(id, -32010, "Feature busy", werr, nullptr);
+                return bleErr(id, -32013, "Feature not ready", werr, nullptr);
+            }
+            uint32_t timeoutMs = p["timeoutMs"] | 2000u;
+            if (timeoutMs > 5000) timeoutMs = 5000;  // blocks the MCP task
+            int status = 0;
+            auto st = bleScanner.getWriteResult(status);
+            for (uint32_t waited = 0;
+                 st == mcp::BLEScanner::WriteState::Pending && waited < timeoutMs; waited += 20) {
+                delay(20);
+                st = bleScanner.getWriteResult(status);
+            }
+            JsonDocument doc;
+            doc["jsonrpc"] = "2.0";
+            doc["id"] = id;
+            if (st == mcp::BLEScanner::WriteState::Ok) {
+                doc["result"]["ok"]           = true;
+                doc["result"]["handle"]       = ref.handle;
+                doc["result"]["uuid"]         = ref.uuid;
+                doc["result"]["bytes"]        = value.size();
+                doc["result"]["withResponse"] = withResponse;
+            } else {
+                doc["error"]["code"] = -32000;
+                doc["error"]["message"] = st == mcp::BLEScanner::WriteState::Pending
+                                              ? "GATT write timed out" : "GATT write failed";
+                doc["error"]["data"]["handle"] = ref.handle;
+                if (status) doc["error"]["data"]["gattStatus"] = status;
+            }
+            std::string out; serializeJson(doc, out); return out;
+        });
+
+    // ble/subscribe — enable notifications (or indications) on one
+    // characteristic.  Values are pushed to this client as
+    // notifications/ble/value (WebSocket) or collected with ble/notifications.
+    mcpServer.registerMethodHandler("ble/subscribe",
+        [resolveChar, invalidParams, bleErr](uint8_t cid, uint32_t id, const JsonObject& p) -> std::string {
+            mcp::gattops::CharRef ref;
+            std::string e = resolveChar(id, p, ref);
+            if (!e.empty()) return e;
+            bool canNotify   = mcp::gattops::hasProperty(ref.properties, "notify");
+            bool canIndicate = mcp::gattops::hasProperty(ref.properties, "indicate");
+            if (!canNotify && !canIndicate)
+                return invalidParams(id, "characteristic supports neither notify nor indicate");
+            bool indicate = p["indicate"].is<bool>() ? p["indicate"].as<bool>() : !canNotify;
+            if (indicate && !canIndicate) return invalidParams(id, "characteristic does not support indicate");
+            if (!indicate && !canNotify) return invalidParams(id, "characteristic does not support notify");
+            const uint32_t gen = mcpServer.clientGeneration(cid);
+            std::string serr;
+            if (!bleScanner.subscribe(ref.handle, ref.uuid, indicate, serr)) {
+                if (serr == "too many subscriptions")
+                    return bleErr(id, -32012, "Resource limit", serr, "ble/unsubscribe");
+                return bleErr(id, -32013, "Feature not ready", serr, nullptr);
+            }
+            if (bleNotifyOwner != cid || bleNotifyOwnerGen != gen) {
+                // A new subscriber never sees values queued for the previous one.
+                uint32_t ignored = 0;
+                bleScanner.drainNotifications(ignored);
+            }
+            bleNotifyOwner = cid;
+            bleNotifyOwnerGen = gen;
+            JsonDocument doc;
+            doc["jsonrpc"] = "2.0";
+            doc["id"] = id;
+            doc["result"]["subscribed"] = true;
+            doc["result"]["handle"]     = ref.handle;
+            doc["result"]["uuid"]       = ref.uuid;
+            doc["result"]["mode"]       = indicate ? "indicate" : "notify";
+            doc["result"]["delivery"]   = cid < mcp::MCP_HTTP_CLIENT_BASE
+                                              ? "push" : "poll";
+            std::string out; serializeJson(doc, out); return out;
+        });
+
+    mcpServer.registerMethodHandler("ble/unsubscribe",
+        [resolveChar, bleErr](uint8_t, uint32_t id, const JsonObject& p) -> std::string {
+            mcp::gattops::CharRef ref;
+            std::string e = resolveChar(id, p, ref);
+            if (!e.empty()) return e;
+            std::string uerr;
+            if (!bleScanner.unsubscribe(ref.handle, uerr))
+                return bleErr(id, -32013, "Feature not ready", uerr, nullptr);
+            JsonDocument doc;
+            doc["jsonrpc"] = "2.0";
+            doc["id"] = id;
+            doc["result"]["subscribed"] = false;
+            doc["result"]["handle"]     = ref.handle;
+            std::string out; serializeJson(doc, out); return out;
+        });
+
+    // ble/notifications — values notified since the last call (for clients
+    // that cannot receive pushes, e.g. Streamable HTTP sessions).
+    mcpServer.registerMethodHandler("ble/notifications",
+        [](uint8_t, uint32_t id, const JsonObject&) -> std::string {
+            uint32_t dropped = 0;
+            auto events = bleScanner.drainNotifications(dropped);
+            JsonDocument doc;
+            doc["jsonrpc"] = "2.0";
+            doc["id"] = id;
+            doc["result"]["connected"] = bleScanner.isConnected();
+            doc["result"]["dropped"]   = dropped;
+            JsonArray subs = doc["result"]["subscriptions"].to<JsonArray>();
+            for (uint16_t h : bleScanner.liveSubscriptions()) subs.add(h);
+            JsonArray arr = doc["result"]["values"].to<JsonArray>();
+            for (const auto& ev : events) {
+                JsonObject o = arr.add<JsonObject>();
+                o["handle"]    = ev.handle;
+                o["uuid"]      = ev.uuid;
+                o["valueHex"]  = ev.valueHex;
+                o["valueText"] = mcp::blecore::hexToAscii(ev.valueHex);
+                o["ts"]        = ev.timestampMs;
+            }
+            std::string out; serializeJson(doc, out); return out;
+        });
 #endif // BOARD_HAS_BLE
+
+    // Expose the methods above as MCP tools (tools/list, tools/call).
+    mcp::registerMcpTools(mcpServer);
 
     // Create MCP task
     xTaskCreatePinnedToCore(
@@ -957,7 +1395,18 @@ void setup() {
 }
 
 void loop() {
-    // Main loop can be used for other tasks
-    // Network and MCP handling is done in their respective tasks
-    delay(1000);
+    // Network and MCP handling run in their own tasks; the loop task serves
+    // the serial console (credential management needs physical access).
+    static String line;
+    while (Serial.available()) {
+        char c = static_cast<char>(Serial.read());
+        if (c == '\r') continue;
+        if (c == '\n') {
+            handleSerialCommand(line);
+            line = "";
+        } else if (line.length() < 128) {
+            line += c;
+        }
+    }
+    delay(20);
 }

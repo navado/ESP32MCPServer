@@ -5,6 +5,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+- **Optional MCP access tokens** — #12
+  - **Off by default**: existing clients and examples keep working unchanged. Turn it on
+    with the serial command `auth on` (or `auth off` to undo), or ship it on with the
+    build flag `MCP_AUTH_DEFAULT=1`. Stored in NVS `security`/`auth`.
+  - Full-control token, plus an optional read-only token, stored in NVS namespace
+    `security`. Sent as `Authorization: Bearer <token>` or `?token=<token>`.
+  - Generated and printed on the serial console when auth is turned on. Managed with the
+    serial commands `token show|rotate|set`, `token ro rotate|clear`, `ota show|rotate`.
+  - With auth on, unauthenticated connections are closed with code 4401, and a read-only
+    token calling a state-changing method gets `-32020`.
+  - Limits: at most 4 clients (close code 4429); per-client rate limit of burst 20, then
+    10/s (`-32021`); a heartbeat drops dead clients.
+  - The dashboard and `examples/client/client.ts` take an optional token.
+- **OTA has no default password** — #12. A random per-device password is generated on
+  first boot (also replacing a stored `admin`). Repeated failed logins from one IP lock
+  that IP out with `429`.
+
 ### Added
 - **Feature/state model and structured errors** — #15
   - `system/features` (and the subscribable resource `device://features`) reports every
@@ -14,7 +32,35 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     and the method that resolves it.
   - Features started by a client are released when it disconnects (scan stopped, GATT
     link dropped).
-  - BLE is blocked while an OTA update is being written.
+  - BLE (including `ble/write` and `ble/subscribe`) is blocked while an OTA update is
+    being written.
+  - MCP tool `system_features`.
+- **BLE client exposure** — #14
+  - GATT **write** (`ble/write`, with or without response, by handle or UUID) and
+    on-demand **subscribe** (`ble/subscribe` / `ble/unsubscribe`). Values are pushed to
+    WebSocket clients as `notifications/ble/value` or polled with `ble/notifications`.
+    All of these need the full-control token.
+  - `ble/services/results` now includes each characteristic's `handle`.
+  - Tools: `ble_write`, `ble_subscribe`, `ble_unsubscribe`, `ble_notifications`.
+  - `examples/client/client.ts` rewritten as a typed module with BLE helpers and a
+    `MCPError` that carries `code` and `data`. Fixed `listResources` / `readResource`
+    (they read a nonexistent `result.data`) and the heartbeat (now a JSON-RPC `ping`).
+  - `examples/client/ble_example.ts` and the dependency-free Python CLI
+    `examples/client/mcp_ble.py` (Streamable HTTP).
+- **Standard MCP clients can connect** — #13
+  - **Streamable HTTP transport** at `POST /mcp` (port 80): sessions via `Mcp-Session-Id`,
+    bearer auth, Origin check, `202` for notifications, `DELETE` to end a session. Works
+    with Claude Code (`--transport http`), Claude Desktop via `mcp-remote`, and the MCP
+    Inspector.
+  - **Tools:** `tools/list` and `tools/call` expose the sensor, bus-history, metrics and
+    BLE methods as 20 tools with JSON Schema inputs, annotations and `structuredContent`.
+    Tools inherit the method's authorization.
+  - **Lifecycle:** protocol version negotiation (`2025-06-18`, `2025-03-26`,
+    `2024-11-05`), spec-shaped capability objects, `ping`, and notifications
+    (`notifications/initialized` and others) are never answered. String request ids are
+    supported.
+  - `resources/read` / `resources/list` now include `uri` and `mimeType` as the spec
+    requires; the old fields are kept.
 - **Bluetooth LE over MCP (ESP32-S3)** — #9, #11
   - Advertising scanner: `ble/scan`, `ble/scan/results`, `ble/scan/payloads`, `ble/scan/poll`, `ble/scan/stop`.
     Non-blocking scans, per-device raw payload history, a MAC-independent payload registry,
@@ -39,6 +85,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `started:false` must handle the error instead.
 - Disconnecting a WebSocket client now stops the BLE scan and drops the GATT link it
   started — #15.
+- `initialize` returns capability *objects* (`resources: {subscribe, listChanged}`,
+  `tools: {listChanged}`) instead of `{subscriptions: bool, resources: bool}`, and the
+  negotiated protocol version instead of a fixed `2024-11-05` — #13.
+- JSON-RPC messages without an `id` are treated as notifications and get no response.
+  Before, they were answered with `id: 0` — #13.
+- **Upgrading:** MCP clients are unaffected (authentication is off until `auth on`). The
+  OTA password changes if it was still `admin`, and the `isDefaultPwd` field is gone from
+  `/ota/config` — #12.
+- **`esp32-c3-devkitm-1` moves to `partitions_4mb_ota.csv`** (the firmware outgrew the
+  1.25 MB app slots). Flash once over USB, then `-t uploadfs`; NVS is kept — #12.
 - **4 MB boards (`esp32-devkitc`, `adafruit-huzzah32`, `m5stack-core`) use a new partition
   table.** It cannot be applied over OTA: flash once over USB, then re-upload the web UI
   with `pio run -e <env> -t uploadfs` (the filesystem moves and shrinks to 128 KB, so its

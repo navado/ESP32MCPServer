@@ -3,6 +3,7 @@
 
 #include <ArduinoJson.h>
 #include "MCPTypes.h"
+#include "AuthPolicy.h"
 #include <functional>
 #include <string>
 #include <unordered_map>
@@ -15,6 +16,28 @@
 
 namespace mcp {
 
+#ifndef NATIVE_TEST
+// WebSocketsServer that runs an admission gate on every new connection BEFORE
+// the application sees it.  The library has already answered the upgrade
+// (101) at that point, so a refused client is closed with an application
+// close code (4401 unauthorized, 4429 too many clients) and its CONNECTED
+// event is swallowed; no message from it is ever processed.
+class GatedWebSocketsServer : public WebSocketsServer {
+public:
+    // Returns 0 to accept, or the WebSocket close code to refuse with.
+    using Gate = std::function<uint16_t(uint8_t num, const String& authorization,
+                                        const String& url)>;
+    explicit GatedWebSocketsServer(uint16_t port) : WebSocketsServer(port) {}
+    void setGate(Gate g) { gate_ = std::move(g); }
+
+protected:
+    void runCbEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length) override;
+
+private:
+    Gate gate_;
+};
+#endif
+
 struct Implementation {
     std::string name;
     std::string version;
@@ -24,6 +47,29 @@ struct ServerCapabilities {
     bool supportsSubscriptions;
     bool supportsResources;
 };
+
+// An MCP tool that exposes an existing JSON-RPC method (issue #13).
+// `inputSchema` is a JSON Schema literal kept in flash and embedded verbatim
+// in tools/list (never parsed or copied to the heap).
+struct ToolDef {
+    std::string name;          // "ble_scan"
+    std::string title;         // "Scan for BLE devices"
+    std::string description;
+    const char* inputSchema = "{\"type\":\"object\"}";
+    std::string method;        // underlying JSON-RPC method, e.g. "ble/scan"
+    bool readOnly    = true;   // annotations (hints for the client)
+    bool destructive = false;
+    bool idempotent  = false;
+    bool openWorld   = false;  // interacts with external entities (BLE peers)
+};
+
+// Protocol revisions this server speaks, newest first.
+constexpr const char* MCP_PROTOCOL_VERSIONS[] = {"2025-06-18", "2025-03-26", "2024-11-05"};
+constexpr const char* MCP_LATEST_PROTOCOL_VERSION = "2025-06-18";
+
+// Client ids at or above this are request/response transports (Streamable
+// HTTP sessions) that cannot receive server-initiated messages.
+constexpr uint8_t MCP_HTTP_CLIENT_BASE = 100;
 
 class MCPServer {
 public:
@@ -64,6 +110,19 @@ public:
     // so a new client must not inherit the previous occupant's subscriptions.
     void removeClient(uint8_t clientId);
 
+    // Send a server-initiated message (notification) to one client.  Returns
+    // false when the client cannot receive pushes (HTTP session, unknown).
+    bool sendToClient(uint8_t clientId, const std::string& msg);
+    // Is `clientId` currently admitted (connected and authenticated)?
+    bool hasClient(uint8_t clientId) const { return clients_.count(clientId) > 0; }
+    // Identity of the connection currently in `clientId`'s slot: a new value
+    // every time a client is admitted, 0 when the slot is empty.  Slot numbers
+    // are reused, so state owned by a connection must be keyed on this.
+    uint32_t clientGeneration(uint8_t clientId) const {
+        auto it = clients_.find(clientId);
+        return it == clients_.end() ? 0 : it->second.generation;
+    }
+
     // Override the transport used for push notifications.
     void setSendFunc(SendFunc fn) { sendFunc_ = fn; }
 
@@ -87,15 +146,38 @@ public:
     using ClientRemovedHook = std::function<void(uint8_t clientId)>;
     void setClientRemovedHook(ClientRemovedHook hook) { clientRemovedHook_ = std::move(hook); }
 
+    // Expose a registered method as an MCP tool (tools/list, tools/call).
+    void registerTool(const ToolDef& tool);
+    size_t toolCount() const { return tools_.size(); }
+    const std::vector<ToolDef>& tools() const { return tools_; }
+
+    // --- Transport security (issue #12) -----------------------------------
+    // Enable authentication with these credentials.  Until this is called the
+    // server is open (unit tests); the firmware always calls it.
+    void setCredentials(const auth::Credentials& creds);
+    // Per-client token bucket: `capacity` burst, `perSec` sustained.
+    void setRateLimit(uint32_t capacity, uint32_t perSec);
+    // Maximum concurrently admitted clients (default 4).
+    void setMaxClients(size_t n) { maxClients_ = n; }
+    // Time source for rate limiting (defaults to millis()).
+    void setClock(std::function<uint32_t()> clock) { clock_ = std::move(clock); }
+
+    enum class Admission { Accepted, Unauthorized, TooManyClients };
+    // Admission decision for a new connection; on Accepted the client gets
+    // the access level of its token.  Called by the transport at connect.
+    Admission admitClient(uint8_t clientId, const std::string& authorization,
+                          const std::string& url);
+    auth::Access clientAccess(uint8_t clientId) const;
+    size_t clientCount() const { return clients_.size(); }
+
 private:
-    static constexpr const char* PROTOCOL_VERSION = "2024-11-05";
 
     uint16_t port_;
     Implementation serverInfo_{"esp32-mcp-server", "1.0.0"};
     ServerCapabilities capabilities_{true, true};
     SendFunc sendFunc_;
 #ifndef NATIVE_TEST
-    WebSocketsServer wsServer_;
+    GatedWebSocketsServer wsServer_;
     void onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length);
     void onClientConnect(uint8_t num);
 #endif
@@ -115,11 +197,38 @@ private:
     std::vector<UnavailableNamespace> unavailable_;
     ClientRemovedHook clientRemovedHook_;
 
+    // Tool registry, in registration order (tools/list order).
+    std::vector<ToolDef> tools_;
+
+    // Admitted clients: access level + request limiter.
+    struct ClientState {
+        auth::Access      access = auth::Access::None;
+        auth::RateLimiter limiter;
+        uint32_t          generation = 0;
+    };
+    uint32_t nextGeneration_ = 0;
+    std::unordered_map<uint8_t, ClientState> clients_;
+    bool              authEnforced_ = false;
+    auth::Credentials creds_;
+    size_t            maxClients_ = 4;
+    uint32_t          rateCapacity_ = 20;
+    uint32_t          ratePerSec_   = 10;
+    std::function<uint32_t()> clock_;
+    uint32_t now() const;
+
+    // Admission / authorization / rate checks for one request; returns an
+    // error response, or "" to proceed.
+    std::string checkRequest(uint8_t clientId, const std::string& method, uint32_t id);
+
     // Dispatch a parsed request to the appropriate handler.
     std::string dispatch(uint8_t clientId, const std::string& method,
                          uint32_t id, const JsonObject& params);
 
-    std::string handleInitialize(uint32_t id, const JsonObject& params);
+    std::string handleInitialize(uint8_t clientId, uint32_t id, const JsonObject& params);
+    std::string handleToolsList(uint8_t clientId, uint32_t id, const JsonObject& params);
+    std::string handleToolsCall(uint8_t clientId, uint32_t id, const JsonObject& params);
+    std::string invokeHandler(const MethodHandler& handler, uint8_t clientId,
+                              uint32_t id, const JsonObject& params);
     std::string handleResourcesList(uint32_t id, const JsonObject& params);
     std::string handleResourceRead(uint32_t id, const JsonObject& params);
     std::string handleSubscribe(uint8_t clientId, uint32_t id, const JsonObject& params);
@@ -128,6 +237,8 @@ private:
     // JSON-RPC 2.0 envelope builders
     static std::string makeResult(uint32_t id, JsonDocument& resultDoc);
     static std::string makeError(uint32_t id, int code, const std::string& message);
+    static std::string makeErrorData(uint32_t id, int code, const std::string& message,
+                                     JsonDocument& data);
 };
 
 } // namespace mcp
