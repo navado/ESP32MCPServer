@@ -34,6 +34,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   that IP out with `429`.
 
 ### Added
+- **BLE pairing and bonding** — #24
+  - `ble/pair` supports Just Works, passkey entry (`ble/pair/passkey`) and numeric
+    comparison (`ble/pair/confirm`), with optional MITM protection.
+  - `ble/pair/results` reports state, encryption, bonding and why a pairing failed.
+  - Bonds are kept in NVS; a bonded peer is re-encrypted without pairing again.
+  - `ble/bonds/list` and `ble/bonds/clear`.
+  - Reads that need encryption report `readError` and `needsPairing` in
+    `ble/services/results`.
+  - Matching MCP tools.
 - **BLE 5 extended advertising on the S3** — #25. The scanner uses the extended scan API on
   1M + Coded PHY (`BLE_EXT_SCAN=1`, the default for the S3 envs), so extended-only advertisers
   show up next to legacy ones; reports carry `extended`, `phy` and `secondaryPhy`. Connects

@@ -8,6 +8,7 @@
 #include "BLEGattCore.h"
 #include "BLEGattOps.h"
 #include "BLEScannerCore.h"
+#include "BLESecurityCore.h"
 
 #ifndef NATIVE_TEST
 #include <BLEAdvertisedDevice.h>
@@ -224,10 +225,42 @@ public:
     // Scan completion hook (BLE stack callback, non-blocking start()).
     static void onScanCompleteStatic(BLEScanResults results);
 
-#if BLE_EXT_SCAN && !defined(NATIVE_TEST)
-    // GAP events for the extended scanner (chained via setCustomGapHandler).
+#ifndef NATIVE_TEST
+    // GAP events: extended scanner reports and SMP pairing (chained via
+    // setCustomGapHandler).
     void onGapEvent(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* param);
 #endif
+
+    // --- Pairing and bonding (issue #24) ----------------------------------
+    // Encrypt the current link, pairing first unless a bond exists.  Async:
+    // poll pairStatus().  Returns false with `err` when not connected or a
+    // pairing is already running.  `existingBond` tells whether a stored bond
+    // is being used (no new pairing).
+    bool startPair(const blesec::PairOptions& opts, std::string& err, bool& existingBond);
+    struct PairStatus {
+        blesec::PairState state = blesec::PairState::Idle;
+        bool     encrypted = false;
+        bool     bonded = false;
+        bool     authenticated = false;  // MITM-protected key
+        bool     existingBond = false;
+        uint8_t  failReason = 0;
+        bool     timedOut = false;
+        bool     hasDisplayPasskey = false;   // show this on... we display, peer types it
+        uint32_t displayPasskey = 0;
+        bool     hasCompareValue = false;     // numeric comparison value
+        uint32_t compareValue = 0;
+        bool     needsPasskey = false;        // waiting for answerPasskey()
+        bool     needsConfirm = false;        // waiting for answerConfirm()
+    };
+    PairStatus pairStatus() const;
+    // Answer a pending passkey request (the peer displays it) or numeric
+    // comparison.  False with `err` when nothing is pending.
+    bool answerPasskey(uint32_t passkey, std::string& err);
+    bool answerConfirm(bool accept, std::string& err);
+    // Bonded peers stored in NVS by Bluedroid: (mac, address type).
+    std::vector<std::pair<std::string, uint8_t>> bondedDevices() const;
+    // Remove one bond (mac) or all (mac empty); returns how many were removed.
+    int removeBonds(const std::string& mac);
 
     // Bluedroid GATT client event — invoked from the BLE library's registered
     // handler (chained in begin()).  Must not call controller APIs; it only
@@ -309,6 +342,21 @@ private:
     // On-demand subscriptions (issue #14): handle -> uuid, and their values.
     std::map<uint16_t, std::string> liveSubs_;
     gattops::NotifyQueue notifyQueue_;
+#ifndef NATIVE_TEST
+    bool onPairingEvent(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* param);
+    // True while a ble/pair for the current peer `addr` is running (mutex held).
+    bool pairRequestLive(const uint8_t* addr) const;
+    // Forget per-pairing answers so they can never apply to a later or
+    // peer-initiated pairing (mutex held; the static passkey is cleared by
+    // the caller outside the mutex via clearStaticPasskey()).
+    void forgetPairAnswers();
+    // Back to Just Works / no static passkey: what a peer-initiated pairing gets.
+    static void resetSecurityDefaults();
+#endif
+    // Pairing state (guarded by mutex_).
+    blesec::PairOptions pairOpts_;
+    PairStatus pair_;
+    uint32_t   pairStartMs_ = 0;
     // Extended-report reassembly (BLE_EXT_SCAN; guarded by mutex_).
     std::string extFrag_;
     std::string extFragMac_;

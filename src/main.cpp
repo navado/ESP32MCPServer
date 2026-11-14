@@ -515,6 +515,10 @@ static std::string buildServicesResponse(uint32_t id,
             if (!chr.valueText.empty()) co["valueText"] = chr.valueText;
             if (!chr.valueHex.empty())  co["length"] = chr.valueLength;
             if (chr.truncated)          co["truncated"] = true;
+            if (chr.readError) {
+                co["readError"] = mcp::blesec::attErrorName(chr.readError);
+                if (mcp::blesec::attErrorNeedsPairing(chr.readError)) co["needsPairing"] = true;
+            }
         }
     }
     std::string out; serializeJson(doc, out); return out;
@@ -1534,6 +1538,142 @@ void setup() {
                 o["length"]    = ev.length;
                 if (ev.truncated) o["truncated"] = true;
             }
+            std::string out; serializeJson(doc, out); return out;
+        });
+
+    // --- Pairing and bonding (issue #24) -----------------------------------
+    // ble/pair — encrypt the link, pairing (and bonding) first unless a bond
+    // exists.  Asynchronous: poll ble/pair/results.
+    mcpServer.registerMethodHandler("ble/pair",
+        [invalidParams, bleErr](uint8_t, uint32_t id, const JsonObject& p) -> std::string {
+            if (otaManager.isUpdating()) {
+                mcp::features::Decision d;
+                d.kind = mcp::features::Decision::Kind::Busy;
+                d.feature = "ble.central.gatt";
+                d.blockedBy = "ota";
+                d.state = "flashing";
+                return mcp::features::busyError(id, d);
+            }
+            mcp::blesec::PairOptions o;
+            o.mitm = p["mitm"] | false;
+            o.confirm = p["confirm"] | false;
+            if (!p["passkey"].isNull()) {
+                if (!p["passkey"].is<uint32_t>() || p["passkey"].as<uint32_t>() > mcp::blesec::MAX_PASSKEY)
+                    return invalidParams(id, "passkey must be an integer 0-999999");
+                o.hasPasskey = true;
+                o.passkey = p["passkey"].as<uint32_t>();
+            }
+            o.ioCap = mcp::blesec::defaultIoCap(o.hasPasskey, o.confirm);
+            if (p["iocap"].is<const char*>() && !mcp::blesec::parseIoCap(p["iocap"].as<const char*>(), o.ioCap))
+                return invalidParams(id, "iocap must be none|display|display-yesno|keyboard|keyboard-display");
+            if (!bleScanner.isConnected())
+                return bleErr(id, -32013, "Feature not ready", "not connected", "ble/connect");
+            std::string err;
+            bool existing = false;
+            if (!bleScanner.startPair(o, err, existing)) {
+                if (err == "pairing in progress")
+                    return bleErr(id, -32010, "Feature busy", err, "ble/pair/results");
+                return bleErr(id, -32013, "Feature not ready", err, nullptr);
+            }
+            JsonDocument doc;
+            doc["jsonrpc"] = "2.0";
+            doc["id"] = id;
+            doc["result"]["started"]      = true;
+            doc["result"]["existingBond"] = existing;
+            doc["result"]["iocap"]        = mcp::blesec::ioCapName(o.ioCap);
+            doc["result"]["mitm"]         = o.mitm;
+            std::string out; serializeJson(doc, out); return out;
+        });
+
+    mcpServer.registerMethodHandler("ble/pair/results",
+        [](uint8_t, uint32_t id, const JsonObject&) -> std::string {
+            auto st = bleScanner.pairStatus();
+            JsonDocument doc;
+            doc["jsonrpc"] = "2.0";
+            doc["id"] = id;
+            JsonObject r = doc["result"].to<JsonObject>();
+            r["state"]         = mcp::blesec::pairStateName(st.state);
+            r["connected"]     = bleScanner.isConnected();
+            r["encrypted"]     = st.encrypted;
+            r["bonded"]        = st.bonded;
+            r["authenticated"] = st.authenticated;
+            r["existingBond"]  = st.existingBond;
+            if (st.state == mcp::blesec::PairState::Failed) {
+                if (st.timedOut) {
+                    r["reason"] = "timeout";
+                } else if (st.failReason) {
+                    r["reason"] = mcp::blesec::pairFailReasonName(st.failReason);
+                    r["reasonCode"] = st.failReason;
+                }
+            }
+            if (st.hasDisplayPasskey) r["passkey"] = st.displayPasskey;      // type this on the peer
+            if (st.hasCompareValue)   r["compareValue"] = st.compareValue;   // numeric comparison
+            if (st.state == mcp::blesec::PairState::Pairing) {
+                if (st.needsPasskey) r["needs"] = "passkey";   // answer with ble/pair/passkey
+                else if (st.needsConfirm) r["needs"] = "confirm";  // ble/pair/confirm
+            }
+            std::string out; serializeJson(doc, out); return out;
+        });
+
+    // ble/pair/passkey — enter the passkey the peripheral displays.
+    mcpServer.registerMethodHandler("ble/pair/passkey",
+        [invalidParams, bleErr](uint8_t, uint32_t id, const JsonObject& p) -> std::string {
+            if (!p["passkey"].is<uint32_t>() || p["passkey"].as<uint32_t>() > mcp::blesec::MAX_PASSKEY)
+                return invalidParams(id, "passkey must be an integer 0-999999");
+            std::string err;
+            if (!bleScanner.answerPasskey(p["passkey"].as<uint32_t>(), err))
+                return bleErr(id, -32013, "Feature not ready", err, "ble/pair");
+            JsonDocument doc;
+            doc["jsonrpc"] = "2.0";
+            doc["id"] = id;
+            doc["result"]["ok"] = true;
+            std::string out; serializeJson(doc, out); return out;
+        });
+
+    // ble/pair/confirm — answer a numeric comparison (compareValue matches
+    // what the peripheral shows: accept true).
+    mcpServer.registerMethodHandler("ble/pair/confirm",
+        [invalidParams, bleErr](uint8_t, uint32_t id, const JsonObject& p) -> std::string {
+            if (!p["accept"].is<bool>()) return invalidParams(id, "accept (boolean) required");
+            std::string err;
+            if (!bleScanner.answerConfirm(p["accept"].as<bool>(), err))
+                return bleErr(id, -32013, "Feature not ready", err, "ble/pair");
+            JsonDocument doc;
+            doc["jsonrpc"] = "2.0";
+            doc["id"] = id;
+            doc["result"]["ok"] = true;
+            std::string out; serializeJson(doc, out); return out;
+        });
+
+    mcpServer.registerMethodHandler("ble/bonds/list",
+        [](uint8_t, uint32_t id, const JsonObject&) -> std::string {
+            JsonDocument doc;
+            doc["jsonrpc"] = "2.0";
+            doc["id"] = id;
+            JsonArray a = doc["result"]["bonds"].to<JsonArray>();
+            for (const auto& b : bleScanner.bondedDevices()) {
+                JsonObject o = a.add<JsonObject>();
+                o["mac"] = b.first;
+                o["addrType"] = mcp::blecore::addrTypeName(b.second);
+            }
+            std::string out; serializeJson(doc, out); return out;
+        });
+
+    mcpServer.registerMethodHandler("ble/bonds/clear",
+        [invalidParams](uint8_t, uint32_t id, const JsonObject& p) -> std::string {
+            std::string mac;
+            if (p["mac"].is<const char*>()) {
+                mac = p["mac"].as<const char*>();
+                for (auto& ch : mac) ch = static_cast<char>(tolower(static_cast<unsigned char>(ch)));
+                unsigned o[6];
+                char t;
+                if (sscanf(mac.c_str(), "%x:%x:%x:%x:%x:%x%c", &o[0], &o[1], &o[2], &o[3], &o[4], &o[5], &t) != 6)
+                    return invalidParams(id, "mac must be aa:bb:cc:dd:ee:ff");
+            }
+            JsonDocument doc;
+            doc["jsonrpc"] = "2.0";
+            doc["id"] = id;
+            doc["result"]["removed"] = bleScanner.removeBonds(mac);
             std::string out; serializeJson(doc, out); return out;
         });
 #endif // BOARD_HAS_BLE
