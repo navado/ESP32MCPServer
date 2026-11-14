@@ -34,7 +34,7 @@ async function main() {
         }
 
         console.log(`Connecting to ${mac}...`);
-        await client.bleConnect(mac, { timeoutMs: 5000 });
+        await client.bleConnect(mac, { timeoutMs: 10000 });
 
         console.log('Enumerating services...');
         const services = await client.bleEnumerate({ notifyCaptureMs: 2000 });

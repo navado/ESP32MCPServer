@@ -62,7 +62,7 @@ const char kBleScanResults[] = R"J({"type":"object","properties":{
 
 const char kBleConnect[] = R"J({"type":"object","properties":{
 "mac":{"type":"string","pattern":"^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$","description":"Peer address aa:bb:cc:dd:ee:ff"},
-"timeoutMs":{"type":"integer","minimum":1,"default":5000},
+"timeoutMs":{"type":"integer","minimum":1,"default":10000,"description":"Give up after this long. Peripherals that advertise slowly (about once a second) often need 5-10 s"},
 "addrType":{"type":"string","enum":["public","random","rpa-public","rpa-random"],"description":"Default: the type seen in the last scan (public if not seen)"}},
 "required":["mac"],"additionalProperties":false})J";
 
