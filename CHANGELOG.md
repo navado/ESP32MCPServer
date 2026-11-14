@@ -32,8 +32,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     and the method that resolves it.
   - Features started by a client are released when it disconnects (scan stopped, GATT
     link dropped).
-  - BLE (including `ble/write` and `ble/subscribe`) is blocked while an OTA update is
-    being written.
+  - OTA takes priority over BLE: an upload stops the scan and drops the GATT link, and BLE
+    (including `ble/write` and `ble/subscribe`) is blocked until it ends.
   - MCP tool `system_features`.
 - **BLE client exposure** — #14
   - GATT **write** (`ble/write`, with or without response, by handle or UUID) and

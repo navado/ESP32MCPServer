@@ -682,6 +682,8 @@ After subscribing the server pushes unsolicited `notifications/resources/updated
 
 Some features cannot run at the same time (for example BLE and an OTA flash), and some are not built for every board.  `system/features` reports the live state of each one; the same document is published as the resource `device://features`, so a client can `resources/subscribe` to it and get `notifications/resources/updated` whenever a feature changes state.
 
+OTA takes priority over BLE: an authenticated firmware upload stops a running scan and drops the GATT link, and BLE requests are refused with `-32010` (`blockedBy: "ota"`) until the upload ends.
+
 ```json
 {"jsonrpc":"2.0","method":"system/features","id":30}
 ```

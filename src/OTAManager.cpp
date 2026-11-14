@@ -223,6 +223,7 @@ void OTAManager::handleUpdateUpload(AsyncWebServerRequest* request,
         uploadDone_  = false;
         lastErrorMsg_ = "";
         Serial.printf("[OTA] Upload started, free heap: %u\n", (unsigned)ESP.getFreeHeap());
+        if (updateStartHook_) updateStartHook_();
 
         if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) {
             uploadError_  = true;

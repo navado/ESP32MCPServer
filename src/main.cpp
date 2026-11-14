@@ -539,6 +539,15 @@ void setup() {
 
     // Initialize OTA manager — loads password from NVS, registers /ota/* routes.
     otaManager.begin();
+#if BOARD_HAS_BLE
+    // OTA wins over BLE: an authenticated upload stops the scan and drops the
+    // GATT link (both only record intent under the scanner's mutex; the GATT
+    // task does the controller work), and BLE stays blocked until it ends.
+    otaManager.setUpdateStartHook([] {
+        bleScanner.stopScan();
+        bleScanner.disconnect();
+    });
+#endif
     networkManager.setOTAManager(&otaManager);
 
     // Initialize discovery manager (loads NVS config; hostname derived from MAC
@@ -1212,7 +1221,7 @@ void setup() {
             d.kind = mcp::features::Decision::Kind::Busy;
             d.feature = "ble.central.gatt";
             d.blockedBy = "ota";
-            d.state = "updating";
+            d.state = "flashing";
             return mcp::features::busyError(id, d);
         }
         if (!bleScanner.isConnected())
