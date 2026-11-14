@@ -9,6 +9,7 @@
 #include <esp_gap_bt_api.h>
 #include <esp_gatt_defs.h>
 #include <esp_gattc_api.h>
+#include <esp_gatt_common_api.h>
 #include <new>
 
 namespace mcp {
@@ -116,6 +117,8 @@ void BLEScanner::begin() {
 #if BLE_EXT_SCAN
     BLEDevice::setCustomGapHandler(gapTrampoline);
 #endif
+    // Offer the largest ATT MTU; each link negotiates it after opening (#26).
+    esp_ble_gatt_set_local_mtu(gattcore::LOCAL_ATT_MTU);
 }
 
 bool BLEScanner::startScan(uint32_t durationMs, const blecore::CaptureFilter& filter) {
@@ -232,13 +235,42 @@ void BLEScanner::evictAt(size_t idx) {
     ++devicesEvicted_;
 }
 
-void BLEScanner::setCaptureLimits(size_t maxDevices, size_t maxBytes) {
+void BLEScanner::setCaptureLimits(size_t maxDevices, size_t maxBytes, size_t valueBytes,
+                                  size_t valueBudget) {
     if (maxDevices < 1) maxDevices = 1;
     if (maxDevices > blecore::MAX_DEVICES_LIMIT) maxDevices = blecore::MAX_DEVICES_LIMIT;
+    if (valueBytes < 20) valueBytes = 20;
+    if (valueBytes > gattcore::MAX_GATT_VALUE_BYTES) valueBytes = gattcore::MAX_GATT_VALUE_BYTES;
     lock();
     maxDevices_ = maxDevices;
     maxCaptureBytes_ = maxBytes;
+    valueCap_ = valueBytes;
+    valueBudget_ = valueBudget;
     unlock();
+}
+
+size_t BLEScanner::storedValueBytes(uint16_t skipHandle) const {
+    size_t n = 0;
+    for (const auto& svc : services_)
+        for (const auto& chr : svc.characteristics)
+            if (chr.handle != skipHandle) n += chr.valueHex.size() / 2;
+    for (const auto& kv : notifyValues_)
+        if (kv.first != skipHandle) n += kv.second.size() / 2;
+    return n;
+}
+
+size_t BLEScanner::getValueCap() const {
+    lock();
+    size_t c = valueCap_;
+    unlock();
+    return c;
+}
+
+uint16_t BLEScanner::getMtu() const {
+    lock();
+    uint16_t m = mtu_;
+    unlock();
+    return m;
 }
 
 size_t BLEScanner::getMaxDevices() const {
@@ -501,6 +533,7 @@ bool BLEScanner::connect(const std::string& mac, uint32_t timeoutMs, int addrTyp
     }
     hasPeer_ = true;
     connectTimeoutMs_ = timeoutMs;
+    mtu_ = gattcore::DEFAULT_ATT_MTU;
     openIssued_ = false;
     // The GATT app registration survives across connections, and registering
     // the same app id again fails with ESP_GATT_ERROR (REG_EVT not OK), which
@@ -568,6 +601,7 @@ std::vector<BLEServiceInfo> BLEScanner::getServicesStart() {
     pendingReads_.clear();
     notifyHandles_.clear();
     notifyValues_.clear();
+    notifyLengths_.clear();
     // A fresh enumeration subscribes to everything notifiable; on-demand
     // subscriptions (and their handles) are re-established by the client.
     liveSubs_.clear();
@@ -621,13 +655,18 @@ std::vector<BLEServiceInfo> BLEScanner::getServicesResults(uint32_t notifyCaptur
     std::vector<BLEServiceInfo> out = services_;
     // Fold any captured notified values into the response.
     for (auto& [handle, uuid] : notifyHandles_) {
+        (void)uuid;
         auto it = notifyValues_.find(handle);
         if (it == notifyValues_.end()) continue;
+        auto len = notifyLengths_.find(handle);
         for (auto& svc : out) {
             for (auto& chr : svc.characteristics) {
-                if (chr.uuid == uuid) {
+                if (chr.handle == handle) {
                     chr.valueHex = it->second;
                     chr.valueText = hexToAscii(chr.valueHex);
+                    chr.valueLength = len != notifyLengths_.end() ? len->second
+                                                                  : it->second.size() / 2;
+                    chr.truncated = chr.valueLength > it->second.size() / 2;
                 }
             }
         }
@@ -841,6 +880,16 @@ void BLEScanner::onGattcEvent(esp_gattc_cb_event_t event, esp_gatt_if_t gattcIf,
                     connected_ = true;
                     gattState_ = GattState::Connected;
                     stateStartMillis_ = millis();
+                    // The open event carries the MTU already in effect (the
+                    // peer may have run the exchange itself).
+                    mtu_ = param->open.mtu > gattcore::DEFAULT_ATT_MTU ? param->open.mtu
+                                                                       : gattcore::DEFAULT_ATT_MTU;
+                    const uint16_t cid = connId_;
+                    unlock();
+                    // Ask for a larger MTU (answered by CFG_MTU_EVT).  Outside
+                    // the mutex; Bluedroid queues it ahead of later requests.
+                    esp_ble_gattc_send_mtu_req(gattcIf, cid);
+                    break;
                 }
                 unlock();
             } else if (gattState_ == GattState::Idle) {
@@ -852,6 +901,19 @@ void BLEScanner::onGattcEvent(esp_gattc_cb_event_t event, esp_gatt_if_t gattcIf,
             } else {
                 unlock();
             }
+            break;
+        }
+        case ESP_GATTC_CFG_MTU_EVT: {
+            lock();
+            // Our request fails if the peer already ran the exchange; the
+            // event still reports the MTU in effect.  It can also arrive
+            // before OPEN_EVT, so only the interface and a sane size are checked.
+            if (gattcIf == gattcIf_ && param->cfg_mtu.mtu >= gattcore::DEFAULT_ATT_MTU &&
+                (connected_ || gattState_ == GattState::Connecting) &&
+                (param->cfg_mtu.status == ESP_GATT_OK || param->cfg_mtu.mtu > mtu_)) {
+                mtu_ = param->cfg_mtu.mtu;
+            }
+            unlock();
             break;
         }
         case ESP_GATTC_SEARCH_CMPL_EVT: {
@@ -875,19 +937,30 @@ void BLEScanner::onGattcEvent(esp_gattc_cb_event_t event, esp_gatt_if_t gattcIf,
             std::string uuid = it->second;
             pendingReads_.erase(it);
             if (param->read.status == ESP_GATT_OK && param->read.value_len > 0) {
-                std::string val(reinterpret_cast<const char*>(param->read.value),
-                                gattcore::clampGattValueLen(param->read.value_len));
-                std::string hex = hexEncode(reinterpret_cast<const uint8_t*>(val.data()),
-                                            val.length());
-                for (auto& svc : services_) {
-                    for (auto& chr : svc.characteristics) {
-                        if (chr.uuid == uuid) {
-                            chr.valueHex = hex;
-                            chr.valueText = hexToAscii(hex);
+                // Bluedroid already did a long read (read blob) for values
+                // longer than MTU-1; keep up to the memory plan's cap.
+                // Bounded per value AND over the whole link (memory plan).
+                const size_t keep = gattcore::gattBytesToKeep(
+                    param->read.value_len, valueCap_,
+                    storedValueBytes(param->read.handle), valueBudget_);
+                try {
+                    std::string hex = hexEncode(param->read.value, keep);
+                    for (auto& svc : services_) {
+                        for (auto& chr : svc.characteristics) {
+                            if (chr.handle == param->read.handle) {
+                                chr.valueHex = hex;
+                                chr.valueText = hexToAscii(hex);
+                                chr.valueLength = param->read.value_len;
+                                chr.truncated = keep < param->read.value_len;
+                            }
                         }
                     }
+                } catch (const std::bad_alloc&) {
+                    // Out of memory in the BLE callback: drop the value
+                    // rather than abort (an uncaught throw here reboots).
                 }
             }
+            (void)uuid;
             if (pendingReads_.empty() && gattState_ == GattState::Reading) {
                 if (notifyHandles_.empty()) {
                     gattEnumDone();
@@ -913,19 +986,29 @@ void BLEScanner::onGattcEvent(esp_gattc_cb_event_t event, esp_gatt_if_t gattcIf,
                 unlock();
                 break;
             }
-            std::string val(reinterpret_cast<const char*>(param->notify.value),
-                            gattcore::clampGattValueLen(param->notify.value_len));
-            std::string hex = hexEncode(reinterpret_cast<const uint8_t*>(val.data()),
-                                        val.length());
-            notifyValues_[param->notify.handle] = hex;
-            auto live = liveSubs_.find(param->notify.handle);
-            if (live != liveSubs_.end()) {
-                gattops::NotifyEvent ev;
-                ev.handle      = param->notify.handle;
-                ev.uuid        = live->second;
-                ev.valueHex    = hex;
-                ev.timestampMs = millis();
-                notifyQueue_.push(std::move(ev));
+            try {
+                // The latest value per handle counts against the link budget;
+                // queued events are bounded by count (MAX_QUEUED_NOTIFICATIONS)
+                // times the per-value cap.
+                const size_t keepLatest = gattcore::gattBytesToKeep(
+                    param->notify.value_len, valueCap_,
+                    storedValueBytes(param->notify.handle), valueBudget_);
+                notifyValues_[param->notify.handle] = hexEncode(param->notify.value, keepLatest);
+                notifyLengths_[param->notify.handle] = param->notify.value_len;
+                auto live = liveSubs_.find(param->notify.handle);
+                if (live != liveSubs_.end()) {
+                    const size_t keep = gattcore::clampGattValueLen(param->notify.value_len, valueCap_);
+                    gattops::NotifyEvent ev;
+                    ev.handle      = param->notify.handle;
+                    ev.uuid        = live->second;
+                    ev.valueHex    = hexEncode(param->notify.value, keep);
+                    ev.timestampMs = millis();
+                    ev.length      = param->notify.value_len;
+                    ev.truncated   = keep < param->notify.value_len;
+                    notifyQueue_.push(std::move(ev));
+                }
+            } catch (const std::bad_alloc&) {
+                // Drop the value rather than abort in the BLE callback.
             }
             unlock();
             break;

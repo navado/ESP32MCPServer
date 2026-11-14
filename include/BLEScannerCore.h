@@ -60,6 +60,8 @@ struct BLECharInfo {
     std::string properties;   // read/write/notify/indicate/...
     std::string valueHex;     // last read / notified value (may be empty)
     std::string valueText;    // printable ASCII of valueHex (may be empty)
+    size_t      valueLength = 0;    // length of the value received (bytes)
+    bool        truncated = false;  // valueHex holds only the first bytes
 };
 
 // One GATT service discovered on a connected device.
