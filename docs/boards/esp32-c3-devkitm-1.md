@@ -118,4 +118,4 @@ This env keeps the default 4 MB partition layout (the RISC-V build fits the 1.25
 
 ## Security
 
-The MCP WebSocket requires an access token, and OTA uses a random per-device password. Both are printed once on the serial console at first boot (`token show` / `ota show` to see them again). **There is no TLS on this board:** the token and data travel in clear text, so use it on a trusted network. See [Security](../../README.md#security).
+MCP authentication is off by default; type `auth on` on the serial console to require an access token (it is generated and printed; `token show` prints it again). OTA uses a random per-device password printed at first boot (`ota show`). **There is no TLS on this board:** the token and data travel in clear text, so use it on a trusted network. See [Security](../../README.md#security).

@@ -270,33 +270,44 @@ pio run -t upload -e nrf52840-dk
 2. Connect to that AP and open **`http://192.168.4.1`**.
 3. Enter your WiFi credentials and click Save.
 4. The board joins your network and prints its IP address on the serial console.
-5. On first boot the serial console prints a generated **MCP access token** and **OTA password** (shown once; type `token show` / `ota show` on the console to see them again).
-6. Connect an MCP client to **`http://<IP>/mcp`** (Streamable HTTP, see [Connecting an MCP client](#connecting-an-mcp-client)), or the legacy WebSocket **`ws://<IP>:9000`**, with the token: header `Authorization: Bearer <token>`, or `ws://<IP>:9000/?token=<token>` from a browser. The dashboard asks for the token once and remembers it. See [Security](#security).
+5. Connect an MCP client to **`http://<IP>/mcp`** (Streamable HTTP, see [Connecting an MCP client](#connecting-an-mcp-client)), or the legacy WebSocket **`ws://<IP>:9000`**. MCP authentication is **off by default**, so the examples below work as-is on a trusted network. To require a token, type `auth on` on the serial console (or build with `-D MCP_AUTH_DEFAULT=1`); see [Security](#security).
+6. On first boot the serial console prints a generated **OTA password** (`ota show` prints it again).
 
 ---
 
 ## Security
 
-The device is meant for a **trusted LAN**. The MCP WebSocket is authenticated; there is no TLS yet (see below).
+The device is meant for a **trusted LAN**. MCP authentication is **optional and off by default**: out of the box any host that can reach the device can use it, exactly as before. Turn it on for anything but a lab bench. There is no TLS yet (see below).
 
-**Threat model.** Without a token, any host that can reach port 9000 could open BLE connections to nearby devices, read sensor, bus and metrics data, clear logs, and tie up the server. Authentication stops an unauthenticated host on the network from doing any of that. It does **not** protect against someone who can sniff the traffic: the token and all data travel in clear text over `ws://`, and the OTA password over plain HTTP Basic Auth. Physical access to the USB serial console is trusted: it can show and change every secret.
+**Turning authentication on or off** (NVS namespace `security`, key `auth`):
 
-**MCP access tokens** (NVS namespace `security`):
+| How | Effect |
+|---|---|
+| Serial console `auth on` | Require a token. A full-control token is generated and printed if none exists. Reboots |
+| Serial console `auth off` | Accept clients without a token again (stored tokens are kept). Reboots |
+| `-D MCP_AUTH_DEFAULT=1` build flag | Ship boards with authentication on (used when the `auth` key is absent) |
+| NVS image | Pre-provision `auth`, `token` and `ro_token` like the WiFi credentials |
+
+When authentication is off every client has full control. Rate limits, the client limit and the Origin check stay active either way.
+
+**Threat model.** With authentication off, any host that can reach port 9000 could open BLE connections to nearby devices, read sensor, bus and metrics data, clear logs, and tie up the server. Turning it on stops an unauthenticated host on the network from doing any of that. It does **not** protect against someone who can sniff the traffic: the token and all data travel in clear text over `ws://`, and the OTA password over plain HTTP Basic Auth. Physical access to the USB serial console is trusted: it can show and change every secret.
+
+**MCP access tokens** (NVS namespace `security`; used only when authentication is on):
 
 | Token | Key | Access |
 |---|---|---|
 | Full control | `token` | Every method |
 | Read-only (optional) | `ro_token` | Observation only, nothing that changes shared state: `initialize`, `resources/*`, `sensors/read`, `metrics/*`, `logs/query`, `bus/history/read`, `bus/history/config/get`, `ble/scan/poll`, `ble/connect/results`. Starting or stopping the shared BLE scan (`ble/scan`, `ble/scan/stop`, `ble/scan/results`, `ble/scan/payloads`), `sensors/i2c/scan` (it writes init commands to devices), `ble/connect`, `ble/services/*`, `ble/disconnect`, `logs/clear`, `bus/history/config/set` and any method not on the list need full control |
 
-- On first boot with no token, a random 128-bit token is generated and printed once on the serial console.
+- When authentication is on and no token exists, a random 128-bit token is generated and printed on the serial console (`token show` prints it again).
 - Clients send it as `Authorization: Bearer <token>` or, from browsers (which cannot set WebSocket headers), as `?token=<token>`.
 - A connection without a valid token is closed with WebSocket close code **4401** before any message is processed. A read-only client calling a full-control method gets `-32020` (`data.required: "full"`).
-- Lab builds can set `-D MCP_ALLOW_UNAUTHENTICATED=1`: with **no token provisioned**, clients are then accepted without one (a provisioned token is still enforced). Never ship this.
 
-**Serial console** (115200 baud; type `help`):
+**Serial console** (115200 baud on UART0; on the ESP32-S3-DevKitC-1 that is the USB port labelled **UART/COM**, not the native USB port; type `help`):
 
 | Command | Effect |
 |---|---|
+| `auth status` / `auth on` / `auth off` | Show / require / stop requiring a token; on and off reboot |
 | `token show` | Print both tokens |
 | `token rotate` / `token set <value>` | New random / chosen (≥ 16 chars) full-control token; reboots to apply |
 | `token ro rotate` / `token ro clear` | New / remove the read-only token; reboots |
@@ -318,7 +329,7 @@ Tokens can also be pre-provisioned in an NVS image, like the WiFi credentials.
 
 **Not covered yet.**
 - **TLS.** Neither transport is encrypted: the WebSocket library has no server-side TLS on ESP32, and the HTTP server used for `/mcp` doesn't either. On the 4 MB boards there is no flash headroom for TLS at all. Use a trusted network, or a TLS-terminating proxy or VPN.
-- The other port-80 HTTP endpoints (dashboard, WiFi setup, `/bus-history`) are unauthenticated. `/mcp` requires the token.
+- The other port-80 HTTP endpoints (dashboard, WiFi setup, `/bus-history`) are unauthenticated. `/mcp` requires the token when authentication is on.
 - OAuth 2.1 (MCP authorization for HTTP transports) doesn't fit on the device. `/mcp` takes the same static bearer token, which MCP clients can send as a configured `Authorization` header.
 
 ---
@@ -352,7 +363,7 @@ A browser-based dashboard is served from flash at **`http://<IP>/app`**.
 
 ## MCP API Reference
 
-All methods use **JSON-RPC 2.0** and require an access token (see [Security](#security)). Two transports serve the same methods:
+All methods use **JSON-RPC 2.0**. No access token is needed unless authentication is turned on (see [Security](#security)). Two transports serve the same methods:
 
 | Transport | Endpoint | Use it for |
 |---|---|---|
@@ -364,6 +375,8 @@ All methods use **JSON-RPC 2.0** and require an access token (see [Security](#se
 Claude Code:
 
 ```bash
+claude mcp add --transport http esp32 http://<IP>/mcp
+# with authentication on:
 claude mcp add --transport http esp32 http://<IP>/mcp --header "Authorization: Bearer <token>"
 ```
 
@@ -374,22 +387,22 @@ Claude Desktop, or any stdio-only client, through [`mcp-remote`](https://www.npm
   "mcpServers": {
     "esp32": {
       "command": "npx",
-      "args": ["mcp-remote", "http://<IP>/mcp", "--allow-http",
-               "--header", "Authorization:${MCP_AUTH}"],
-      "env": { "MCP_AUTH": "Bearer <token>" }
+      "args": ["mcp-remote", "http://<IP>/mcp", "--allow-http"]
     }
   }
 }
 ```
 
-MCP Inspector: `npx @modelcontextprotocol/inspector`, then choose transport *Streamable HTTP*, URL `http://<IP>/mcp`, and add the `Authorization` header.
+With authentication on, add `"--header", "Authorization:${MCP_AUTH}"` to `args` and `"env": { "MCP_AUTH": "Bearer <token>" }`.
+
+MCP Inspector: `npx @modelcontextprotocol/inspector`, then choose transport *Streamable HTTP*, URL `http://<IP>/mcp` (add the `Authorization` header when authentication is on).
 
 ### Streamable HTTP details
 
 - `POST /mcp` takes one JSON-RPC message and returns `application/json`. Notifications get `202 Accepted`.
 - `initialize` (sent without a session id) returns an `Mcp-Session-Id` header that every later request must carry.
 - Unknown or expired sessions get `404`; the client should re-initialize. Sessions expire after 10 minutes idle and count toward the 4-client limit, and `DELETE /mcp` ends one.
-- Every request needs `Authorization: Bearer <token>` (`401` otherwise). A browser `Origin` must match the device's host (`403` otherwise), which protects against DNS rebinding.
+- With authentication on, every request needs `Authorization: Bearer <token>` (`401` otherwise). A browser `Origin` must match the device's host (`403` otherwise), which protects against DNS rebinding.
 - `GET /mcp` returns `405`: the server doesn't open SSE streams, so HTTP clients get no push notifications and `resources.subscribe` is `false` for them.
 - Requests are limited to 16 KB.
 

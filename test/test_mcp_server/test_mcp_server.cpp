@@ -211,6 +211,17 @@ static auth::Credentials secCreds() {
     return c;
 }
 
+void test_auth_off_admits_without_token_with_full_access() {
+    auth::Credentials c = secCreds();
+    c.required = false;
+    server->setCredentials(c);
+    TEST_ASSERT_TRUE(server->admitClient(1, "", "/") == MCPServer::Admission::Accepted);
+    TEST_ASSERT_TRUE(server->clientAccess(1) == auth::Access::Full);
+    std::string resp = mockWs->simulateMessage(1,
+        R"({"jsonrpc":"2.0","method":"resources/list","id":39})");
+    TEST_ASSERT_TRUE(resp.find("\"resources\"") != std::string::npos);
+}
+
 void test_unauthenticated_connection_is_refused() {
     server->setCredentials(secCreds());
     TEST_ASSERT_TRUE(server->admitClient(1, "", "/") == MCPServer::Admission::Unauthorized);
@@ -504,6 +515,7 @@ int runUnityTests() {
     RUN_TEST(test_handler_bad_alloc_returns_error_and_server_survives);
     RUN_TEST(test_concurrent_clients);
     RUN_TEST(test_remove_client_drops_its_subscriptions);
+    RUN_TEST(test_auth_off_admits_without_token_with_full_access);
     RUN_TEST(test_unauthenticated_connection_is_refused);
     RUN_TEST(test_message_from_unadmitted_client_is_rejected);
     RUN_TEST(test_token_via_header_or_query_admits);

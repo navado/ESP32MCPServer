@@ -18,10 +18,11 @@
 #include <Preferences.h>
 #include <esp_random.h>
 
-// Lab builds only: with no token provisioned, accept unauthenticated MCP
-// clients instead of generating a token.  Never ship with this set.
-#ifndef MCP_ALLOW_UNAUTHENTICATED
-#define MCP_ALLOW_UNAUTHENTICATED 0
+// MCP authentication is OFF unless configured: NVS "security"/"auth" (set
+// with the serial console command `auth on`) or, when that key is absent,
+// this build default.  -D MCP_AUTH_DEFAULT=1 ships boards with auth on.
+#ifndef MCP_AUTH_DEFAULT
+#define MCP_AUTH_DEFAULT 0
 #endif
 // Resource limits for the MCP WebSocket (the library itself allows at most
 // WEBSOCKETS_SERVER_CLIENT_MAX = 5 sockets).
@@ -151,12 +152,14 @@ mcp::BLEScanner   bleScanner;
 // ---------------------------------------------------------------------------
 // MCP transport credentials (issue #12)
 //
-// NVS namespace "security": "token" (full control), "ro_token" (read-only,
-// optional).  With no token provisioned, a random 128-bit token is generated
-// on first boot and printed ONCE on the serial console; afterwards it can be
+// NVS namespace "security": "auth" (u8: 1 = clients need a token; absent =
+// MCP_AUTH_DEFAULT), "token" (full control), "ro_token" (read-only,
+// optional).  When auth is on and no token is provisioned, a random 128-bit
+// token is generated and printed on the serial console; afterwards it can be
 // shown or rotated only from the serial console (physical access).
 // ---------------------------------------------------------------------------
 static const char* const SEC_NVS_NAMESPACE = "security";
+static const char* const SEC_KEY_AUTH      = "auth";
 static const char* const SEC_KEY_TOKEN     = "token";
 static const char* const SEC_KEY_RO_TOKEN  = "ro_token";
 static constexpr size_t  MIN_TOKEN_LEN     = 16;
@@ -167,28 +170,28 @@ static std::string newToken() {
 
 static mcp::auth::Credentials loadMcpCredentials() {
     mcp::auth::Credentials c;
-    c.allowUnauthenticated = MCP_ALLOW_UNAUTHENTICATED != 0;
     Preferences prefs;
     prefs.begin(SEC_NVS_NAMESPACE, /*readOnly=*/false);
+    c.required  = prefs.getUChar(SEC_KEY_AUTH, MCP_AUTH_DEFAULT ? 1 : 0) != 0;
     c.fullToken = prefs.getString(SEC_KEY_TOKEN, "").c_str();
     c.readToken = prefs.getString(SEC_KEY_RO_TOKEN, "").c_str();
-    if (c.fullToken.empty() && !c.allowUnauthenticated) {
+    if (c.required && c.fullToken.empty()) {
         c.fullToken = newToken();
         prefs.putString(SEC_KEY_TOKEN, c.fullToken.c_str());
         Serial.println("[security] ==================================================");
         Serial.printf ("[security] Generated MCP access token: %s\n", c.fullToken.c_str());
         Serial.println("[security] Clients must send 'Authorization: Bearer <token>'");
         Serial.println("[security] or connect to ws://<device>:9000/?token=<token>.");
-        Serial.println("[security] Shown once. Type 'help' on this console to manage it.");
+        Serial.println("[security] Type 'help' on this console to manage it.");
         Serial.println("[security] ==================================================");
     }
     prefs.end();
-    if (c.fullToken.empty()) {
-        Serial.println("[security] WARNING: MCP_ALLOW_UNAUTHENTICATED build with no token: "
-                       "ANY host on the network can control this device.");
-    } else {
-        Serial.printf("[security] MCP authentication enabled (read-only token %s)\n",
+    if (c.required) {
+        Serial.printf("[security] MCP authentication ON (read-only token %s)\n",
                       c.readToken.empty() ? "not set" : "set");
+    } else {
+        Serial.println("[security] MCP authentication OFF (default): any host on the "
+                       "network can use this device. Type 'auth on' to require a token.");
     }
     return c;
 }
@@ -214,6 +217,9 @@ static void handleSerialCommand(const String& line) {
     };
     if (cmd == "help") {
         Serial.println("Commands:");
+        Serial.println("  auth status           is MCP authentication on?");
+        Serial.println("  auth on               require a token (generated if none; reboots)");
+        Serial.println("  auth off              accept clients without a token (reboots)");
         Serial.println("  token show            print the MCP tokens");
         Serial.println("  token rotate          new full-control token (reboots)");
         Serial.println("  token set <value>     set the full-control token, >= 16 chars (reboots)");
@@ -221,6 +227,22 @@ static void handleSerialCommand(const String& line) {
         Serial.println("  token ro clear        remove the read-only token (reboots)");
         Serial.println("  ota show              print the OTA password");
         Serial.println("  ota rotate            new random OTA password (reboots)");
+        return;
+    }
+    if (cmd == "auth status") {
+        Preferences prefs;
+        prefs.begin(SEC_NVS_NAMESPACE, true);
+        const bool on = prefs.getUChar(SEC_KEY_AUTH, MCP_AUTH_DEFAULT ? 1 : 0) != 0;
+        prefs.end();
+        Serial.printf("[security] MCP authentication %s\n", on ? "ON" : "OFF");
+        return;
+    }
+    if (cmd == "auth on" || cmd == "auth off") {
+        Preferences prefs;
+        prefs.begin(SEC_NVS_NAMESPACE, false);
+        prefs.putUChar(SEC_KEY_AUTH, cmd == "auth on" ? 1 : 0);
+        prefs.end();
+        rebootToApply();   // a token is generated (and printed) on boot if needed
         return;
     }
     if (cmd == "token show") {
