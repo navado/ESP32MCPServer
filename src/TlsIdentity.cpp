@@ -22,6 +22,9 @@ namespace tls {
 namespace {
 
 const char* const kNs = "tls";
+// Bumped when the certificate profile changes; older stored ones are
+// replaced on boot (2: leaf, CA:FALSE + serverAuth, instead of CA:TRUE).
+constexpr uint8_t kProfile = 2;
 
 void* spiramCalloc(size_t n, size_t size) {
     void* p = heap_caps_calloc(n, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -82,10 +85,15 @@ bool create(const std::string& hostname, const std::string& ipv4, Identity& out,
             mbedtls_x509write_crt_set_validity(&crt, "20250101000000", "20491231235959")) {
             err = "certificate fields failed"; break;
         }
-        // Self-signed trust anchor for its own name: CA:TRUE, pathlen 0.
-        mbedtls_x509write_crt_set_basic_constraints(&crt, 1, 0);
-        mbedtls_x509write_crt_set_key_usage(&crt, MBEDTLS_X509_KU_DIGITAL_SIGNATURE |
-                                                       MBEDTLS_X509_KU_KEY_CERT_SIGN);
+        // A leaf certificate, trusted directly (pinned): it cannot sign other
+        // certificates, so trusting it never trusts anything else.
+        mbedtls_x509write_crt_set_basic_constraints(&crt, 0, -1);
+        mbedtls_x509write_crt_set_key_usage(&crt, MBEDTLS_X509_KU_DIGITAL_SIGNATURE);
+        static const unsigned char kServerAuthEku[] = {   // SEQUENCE { id-kp-serverAuth }
+            0x30, 0x0A, 0x06, 0x08, 0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x03, 0x01};
+        mbedtls_x509write_crt_set_extension(&crt, MBEDTLS_OID_EXTENDED_KEY_USAGE,
+                                            MBEDTLS_OID_SIZE(MBEDTLS_OID_EXTENDED_KEY_USAGE), 0,
+                                            kServerAuthEku, sizeof(kServerAuthEku));
         mbedtls_x509write_crt_set_subject_key_identifier(&crt);
         mbedtls_x509write_crt_set_authority_key_identifier(&crt);
 
@@ -135,7 +143,9 @@ bool loadOrCreateIdentity(const std::string& hostname, const std::string& ipv4,
         out.certPem = prefs.getString("cert", "").c_str();
         out.keyPem  = prefs.getString("key", "").c_str();
         String names = prefs.getString("names", "");
+        const uint8_t profile = prefs.getUChar("profile", 1);
         prefs.end();
+        if (profile != kProfile) out.certPem.clear();
         // A stored certificate that names no IP address (made before the
         // network was up) is replaced once the address is known.
         std::array<uint8_t, 4> probe{};
@@ -169,6 +179,7 @@ bool loadOrCreateIdentity(const std::string& hostname, const std::string& ipv4,
     prefs.putString("cert", out.certPem.c_str());
     prefs.putString("key", out.keyPem.c_str());
     prefs.putString("names", names.c_str());
+    prefs.putUChar("profile", kProfile);
     prefs.end();
     return true;
 }

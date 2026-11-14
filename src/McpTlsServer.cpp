@@ -62,10 +62,20 @@ esp_err_t mcpPost(httpd_req_t* req) {
     in.contentLength = req->content_len;
     if (req->content_len > 0 && req->content_len <= kMaxBody) {
         body.reset(new char[req->content_len + 1]);
+        // A client that stalls mid-body must not hold the (single) server
+        // task: give up after a few receive timeouts (~5 s each).
         size_t got = 0;
+        int timeouts = 0;
         while (got < req->content_len) {
             int r = httpd_req_recv(req, body.get() + got, req->content_len - got);
-            if (r == HTTPD_SOCK_ERR_TIMEOUT) continue;
+            if (r == HTTPD_SOCK_ERR_TIMEOUT) {
+                if (++timeouts >= 3) {
+                    httpd_resp_set_status(req, "408 Request Timeout");
+                    httpd_resp_send(req, nullptr, 0);
+                    return ESP_FAIL;
+                }
+                continue;
+            }
             if (r <= 0) return ESP_FAIL;
             got += static_cast<size_t>(r);
         }
@@ -160,6 +170,7 @@ esp_err_t wsHandler(httpd_req_t* req) {
                 s->slots_[slot].used = true;
                 s->slots_[slot].fd = fd;
                 s->slots_[slot].clientId = static_cast<uint8_t>(MCP_WSS_CLIENT_BASE + slot);
+                s->slots_[slot].gen = ++s->nextGen_;
             }
         }
         if (slot < 0) { closeWith(req, 4429, "Too many clients"); return ESP_OK; }
@@ -170,11 +181,18 @@ esp_err_t wsHandler(httpd_req_t* req) {
         job->authorization = header(req, "Authorization");
         job->url = req->uri;   // carries ?token=
         s->submit(job);
-        if (!McpTlsServer::wait(job, 5000) ||
-            job->admission != MCPServer::Admission::Accepted) {
+        const bool finished = McpTlsServer::wait(job, 5000);
+        if (!finished || job->admission != MCPServer::Admission::Accepted) {
             {
                 std::lock_guard<std::mutex> lock(s->mu_);
                 s->slots_[slot] = McpTlsServer::Slot();
+            }
+            if (!finished) {
+                // The Admit may still run later: undo it in queue order.
+                auto rel = std::make_shared<McpTlsServer::Job>();
+                rel->kind = McpTlsServer::Job::Kind::Release;
+                rel->clientId = cid;
+                s->submit(rel);
             }
             const bool full = job->admission == MCPServer::Admission::TooManyClients;
             closeWith(req, full ? 4429 : 4401, full ? "Too many clients" : "Unauthorized");
@@ -213,13 +231,19 @@ esp_err_t wsHandler(httpd_req_t* req) {
 }
 
 struct PushWork {
+    McpTlsServer*  server;
     httpd_handle_t handle;
     int            fd;
+    uint8_t        clientId;
+    uint32_t       gen;
     std::string    msg;
 };
 
 void pushOnServerTask(void* arg) {
     std::unique_ptr<PushWork> w(static_cast<PushWork*>(arg));
+    // The socket may have closed and its number been reused since the push
+    // was queued: send only if it is still this client's WebSocket.
+    if (!w->server->pushTargetValid(w->fd, w->clientId, w->gen)) return;
     httpd_ws_frame_t f = {};
     f.final = true;
     f.type = HTTPD_WS_TYPE_TEXT;
@@ -305,15 +329,30 @@ void McpTlsServer::pump() {
     }
 }
 
+bool McpTlsServer::pushTargetValid(int fd, uint8_t clientId, uint32_t gen) {
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        bool match = false;
+        for (const auto& sl : slots_)
+            match |= sl.used && sl.fd == fd && sl.clientId == clientId && sl.gen == gen;
+        if (!match) return false;
+    }
+    if (httpd_ws_get_fd_info(static_cast<httpd_handle_t>(handle_), fd) != HTTPD_WS_CLIENT_WEBSOCKET)
+        return false;
+    auto* ctx = static_cast<SessionCtx*>(httpd_sess_get_ctx(static_cast<httpd_handle_t>(handle_), fd));
+    return ctx && ctx->clientId == clientId;
+}
+
 void McpTlsServer::send(uint8_t clientId, const std::string& msg) {
     int fd = -1;
+    uint32_t gen = 0;
     {
         std::lock_guard<std::mutex> lock(mu_);
         for (const auto& sl : slots_)
-            if (sl.used && sl.clientId == clientId) fd = sl.fd;
+            if (sl.used && sl.clientId == clientId) { fd = sl.fd; gen = sl.gen; }
     }
     if (fd < 0 || !handle_) return;
-    auto* w = new PushWork{static_cast<httpd_handle_t>(handle_), fd, msg};
+    auto* w = new PushWork{this, static_cast<httpd_handle_t>(handle_), fd, clientId, gen, msg};
     if (httpd_queue_work(static_cast<httpd_handle_t>(handle_), pushOnServerTask, w) != ESP_OK)
         delete w;
 }

@@ -340,7 +340,7 @@ The **`esp32-s3-devkitc-1-n16r8`** build (`-D MCP_TLS=1`) also serves the MCP tr
 
 The plain endpoints stay available. Authentication works the same on all of them.
 
-**Certificate.** On first boot, once WiFi is up, the device makes an EC P-256 key and a self-signed certificate, valid until 2049, and keeps them in NVS (namespace `tls`). The certificate names `<hostname>.local`, `<hostname>` and the IP address the device had then. The boot log shows the names and the SHA-256 fingerprint, and so does the serial command `tls show`. `tls rotate` makes a new key and certificate (new fingerprint) on the next boot. Use it if the device gets a different IP address, or use the `.local` name instead.
+**Certificate.** On first boot, once WiFi is up, the device makes an EC P-256 key and a self-signed certificate, valid until 2049, and keeps them in NVS (namespace `tls`). It is a leaf certificate (CA:FALSE, server authentication only), so trusting it never trusts anything else. The certificate names `<hostname>.local`, `<hostname>` and the IP address the device had then. The boot log shows the names and the SHA-256 fingerprint, and so does the serial command `tls show`. `tls rotate` makes a new key and certificate (new fingerprint) on the next boot. Use it if the device gets a different IP address, or use the `.local` name instead.
 
 **Trusting it.**
 1. Download the certificate from `http://<device>/tls.pem`.

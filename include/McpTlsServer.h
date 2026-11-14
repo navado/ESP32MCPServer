@@ -57,10 +57,12 @@ public:
 
     // --- used by the C handlers ---
     struct Slot {
-        bool    used = false;
-        int     fd = -1;
-        uint8_t clientId = 0;
+        bool     used = false;
+        int      fd = -1;
+        uint8_t  clientId = 0;
+        uint32_t gen = 0;      // which connection holds the slot (pushes check it)
     };
+    uint32_t nextGen_ = 0;
     struct Job {
         enum class Kind { Admit, Message, Release };
         Kind        kind = Kind::Message;
@@ -81,6 +83,8 @@ public:
     std::shared_ptr<Job> submit(std::shared_ptr<Job> job);
     // Wait (on the server task) for a queued job; false on timeout.
     static bool wait(const std::shared_ptr<Job>& job, uint32_t timeoutMs);
+    // On the server task: is `fd` still the WebSocket of `clientId`/`gen`?
+    bool pushTargetValid(int fd, uint8_t clientId, uint32_t gen);
 };
 
 } // namespace mcp
