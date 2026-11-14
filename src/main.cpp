@@ -314,8 +314,11 @@ static void pushBleNotifications() {
     if (mcpServer.clientGeneration(owner) != bleNotifyOwnerGen) {
         // The subscriber's connection is gone: forget it and discard values
         // queued for it rather than hand them to whoever connects next.
+        // Also stop the peer notifying, so nothing more is queued for it.
         bleNotifyOwner = -1;
         bleNotifyOwnerGen = 0;
+        std::string ignoredErr;
+        for (uint16_t h : bleScanner.liveSubscriptions()) bleScanner.unsubscribe(h, ignoredErr);
         uint32_t ignored = 0;
         bleScanner.drainNotifications(ignored);
         return;
@@ -1107,14 +1110,20 @@ void setup() {
             bool indicate = p["indicate"].is<bool>() ? p["indicate"].as<bool>() : !canNotify;
             if (indicate && !canIndicate) return invalidParams(id, "characteristic does not support indicate");
             if (!indicate && !canNotify) return invalidParams(id, "characteristic does not support notify");
+            const uint32_t gen = mcpServer.clientGeneration(cid);
             std::string serr;
             if (!bleScanner.subscribe(ref.handle, ref.uuid, indicate, serr)) {
                 if (serr == "too many subscriptions")
                     return bleErr(id, -32012, "Resource limit", serr, "ble/unsubscribe");
                 return bleErr(id, -32013, "Feature not ready", serr, nullptr);
             }
+            if (bleNotifyOwner != cid || bleNotifyOwnerGen != gen) {
+                // A new subscriber never sees values queued for the previous one.
+                uint32_t ignored = 0;
+                bleScanner.drainNotifications(ignored);
+            }
             bleNotifyOwner = cid;
-            bleNotifyOwnerGen = mcpServer.clientGeneration(cid);
+            bleNotifyOwnerGen = gen;
             JsonDocument doc;
             doc["jsonrpc"] = "2.0";
             doc["id"] = id;

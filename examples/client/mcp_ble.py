@@ -5,13 +5,13 @@ with BLE helpers (issue #14).
 Library use:
 
     from mcp_ble import McpHttpClient
-    c = McpHttpClient("http://192.168.1.50", token="...")
+    c = McpHttpClient("http://192.168.1.50")          # token="..." if auth is on
     c.initialize()
     devices = c.ble_scan_and_collect(duration_ms=5000)["devices"]
 
 Command line:
 
-    export MCP_URL=http://192.168.1.50 MCP_TOKEN=<token>
+    export MCP_URL=http://192.168.1.50   # MCP_TOKEN=<token> only if auth is on
     python3 mcp_ble.py scan [--seconds 5]
     python3 mcp_ble.py enumerate <mac> [--addr-type random]
     python3 mcp_ble.py write <mac> <handle> <hex> [--no-response]
@@ -42,7 +42,7 @@ class McpError(Exception):
 
 
 class McpHttpClient:
-    def __init__(self, base_url, token, timeout=20.0):
+    def __init__(self, base_url, token="", timeout=20.0):
         self.url = base_url.rstrip("/") + "/mcp"
         self.token = token
         self.timeout = timeout
@@ -55,9 +55,10 @@ class McpHttpClient:
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json, text/event-stream",
-            "Authorization": f"Bearer {self.token}",
             "MCP-Protocol-Version": "2025-06-18",
         }
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
         if self.session_id:
             headers["Mcp-Session-Id"] = self.session_id
         req = urllib.request.Request(self.url, data=json.dumps(message).encode(),
@@ -72,7 +73,8 @@ class McpHttpClient:
         except urllib.error.HTTPError as e:
             detail = e.read().decode(errors="replace")
             if e.code == 401:
-                raise SystemExit("401 Unauthorized: check MCP_TOKEN (serial console: token show)")
+                raise SystemExit("401 Unauthorized: authentication is on; set MCP_TOKEN "
+                                 "(serial console: token show)")
             if e.code == 404 and self.session_id:
                 raise SystemExit("404: session expired; run again to re-initialize")
             raise SystemExit(f"HTTP {e.code}: {detail}")
@@ -104,8 +106,10 @@ class McpHttpClient:
     def close(self):
         if not self.session_id:
             return
-        req = urllib.request.Request(self.url, method="DELETE", headers={
-            "Authorization": f"Bearer {self.token}", "Mcp-Session-Id": self.session_id})
+        headers = {"Mcp-Session-Id": self.session_id}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        req = urllib.request.Request(self.url, method="DELETE", headers=headers)
         try:
             urllib.request.urlopen(req, timeout=5).close()
         except urllib.error.URLError:
@@ -133,20 +137,28 @@ class McpHttpClient:
     def ble_payloads(self):
         return self.request("ble/scan/payloads")
 
-    def ble_connect(self, mac, addr_type=None, timeout_ms=5000):
+    def ble_connect(self, mac, addr_type=None, timeout_ms=5000, attempts=2):
+        """Connect and wait for the link.  BLE connects fail now and then
+        (radio, peer busy re-advertising), so one retry is made by default."""
         params = {"mac": mac, "timeoutMs": timeout_ms}
         if addr_type:
             params["addrType"] = addr_type
-        self.request("ble/connect", params)
-        deadline = time.time() + timeout_ms / 1000 + 1
-        while True:
-            st = self.request("ble/connect/results")
-            if st.get("connected"):
-                return st
-            if not st.get("connecting") or time.time() > deadline:
-                raise RuntimeError(f"connect to {mac} failed "
-                                   "(phones and most sensors need --addr-type random)")
-            time.sleep(0.2)
+        for attempt in range(attempts):
+            started = self.request("ble/connect", params)
+            if not started.get("started") and not started.get("connected"):
+                time.sleep(0.5)          # previous link still closing
+                continue
+            deadline = time.time() + timeout_ms / 1000 + 1
+            while True:
+                st = self.request("ble/connect/results")
+                if st.get("connected"):
+                    return st
+                if not st.get("connecting") or time.time() > deadline:
+                    break
+                time.sleep(0.2)
+        raise RuntimeError(f"connect to {mac} failed after {attempts} attempts "
+                           "(is it advertising and connectable? phones and most "
+                           "sensors need --addr-type random)")
 
     def ble_enumerate(self, notify_capture_ms=2000):
         self.request("ble/services/start")
@@ -204,8 +216,6 @@ def main():
         if name == "watch":
             p.add_argument("--seconds", type=float, default=10)
     args = ap.parse_args()
-    if not args.token:
-        ap.error("set MCP_TOKEN or --token (serial console: token show)")
 
     c = McpHttpClient(args.url, args.token)
     c.initialize()

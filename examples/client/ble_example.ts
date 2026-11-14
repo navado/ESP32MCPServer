@@ -3,7 +3,8 @@
 // subscribe to a notifiable characteristic for a few seconds.
 //
 //   npm install ws tsx
-//   MCP_URL=ws://192.168.1.50:9000 MCP_TOKEN=<token> npx tsx ble_example.ts [mac]
+//   MCP_URL=ws://192.168.1.50:9000 npx tsx ble_example.ts [mac]
+//   (add MCP_TOKEN=<token> when authentication is on)
 //
 // Without a MAC argument the strongest connectable device from the scan is used.
 

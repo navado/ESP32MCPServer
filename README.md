@@ -804,7 +804,7 @@ GATT enumeration runs in the background so a slow or uncooperative peer cannot b
 Example GATT write and subscription with the Python CLI:
 
 ```bash
-export MCP_URL=http://192.168.1.50 MCP_TOKEN=<token>
+export MCP_URL=http://192.168.1.50   # and MCP_TOKEN=<token> if authentication is on
 python3 examples/client/mcp_ble.py enumerate aa:bb:cc:dd:ee:ff --addr-type random
 python3 examples/client/mcp_ble.py write aa:bb:cc:dd:ee:ff 32 01ff --addr-type random
 python3 examples/client/mcp_ble.py watch aa:bb:cc:dd:ee:ff 34 --seconds 10 --addr-type random

@@ -23,6 +23,7 @@ using gattcore::NOTIFY_CAPTURE_TIMEOUT_MS;
 using gattcore::READ_OP_TIMEOUT_MS;
 using gattcore::deadlineExpired;
 using gattcore::GattState;
+using gattcore::linkEventApplies;
 
 // Our GATT client application id (arbitrary, must not clash with the BLE
 // library's default app id).
@@ -454,6 +455,7 @@ std::vector<BLEServiceInfo> BLEScanner::getServicesStart() {
     // A fresh enumeration subscribes to everything notifiable; on-demand
     // subscriptions (and their handles) are re-established by the client.
     liveSubs_.clear();
+    notifyQueue_.clear();   // values of ended subscriptions belong to no one
     unlock();
 
     ensureGattTask();
@@ -797,10 +799,15 @@ void BLEScanner::onGattcEvent(esp_gattc_cb_event_t event, esp_gatt_if_t gattcIf,
         }
         case ESP_GATTC_DISCONNECT_EVT: {
             lock();
-            if (gattcIf == gattcIf_ &&
+            // Ignored while Idle or Connecting: conn_id is often 0 on this
+            // stack, so the previous link's late DISCONNECT/CLOSE would
+            // otherwise abort a reconnect that has not opened yet (its own
+            // failure arrives as a failed OPEN_EVT or the connect timeout).
+            if (gattcIf == gattcIf_ && linkEventApplies(gattState_) &&
                 (connId_ == 0 || param->disconnect.conn_id == connId_)) {
                 gattState_ = GattState::Idle;
                 liveSubs_.clear();
+                notifyQueue_.clear();
                 if (writeState_ == WriteState::Pending) {
                     writeState_  = WriteState::Failed;
                     writeStatus_ = ESP_GATT_ERROR;  // link dropped mid-write
@@ -814,9 +821,11 @@ void BLEScanner::onGattcEvent(esp_gattc_cb_event_t event, esp_gatt_if_t gattcIf,
         }
         case ESP_GATTC_CLOSE_EVT: {
             lock();
-            if (gattcIf == gattcIf_ && param->close.conn_id == connId_) {
+            if (gattcIf == gattcIf_ && linkEventApplies(gattState_) &&
+                param->close.conn_id == connId_) {
                 gattState_ = GattState::Idle;
                 liveSubs_.clear();
+                notifyQueue_.clear();
                 if (writeState_ == WriteState::Pending) {
                     writeState_  = WriteState::Failed;
                     writeStatus_ = ESP_GATT_ERROR;  // link dropped mid-write
