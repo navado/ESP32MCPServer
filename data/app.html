@@ -16,6 +16,9 @@ a{color:#4f8ef7}
 #status-dot.error{background:#e74c3c}
 #status-dot.connecting{background:#f39c12;animation:pulse 1s infinite}
 #status-label{font-size:12px;color:#8892b0}
+#token-form{display:none;gap:6px;align-items:center}
+#token-form.show{display:flex}
+#token-input{background:#0f1220;border:1px solid #2d3150;border-radius:4px;color:#e8eaf0;padding:4px 8px;font-size:12px;width:260px}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
 /* ── tabs ── */
 #tabs{display:flex;background:#1a1e2e;border-bottom:1px solid #2d3150;padding:0 16px}
@@ -92,6 +95,10 @@ label{font-size:12px;color:#8892b0}
 
 <div id="header">
   <h1>ESP32 MCP Dashboard</h1>
+  <form id="token-form" autocomplete="off">
+    <input id="token-input" type="password" placeholder="MCP access token (serial console: token show)">
+    <button class="btn-primary" type="submit">Connect</button>
+  </form>
   <span id="status-dot"></span>
   <span id="status-label">Connecting…</span>
 </div>
@@ -234,7 +241,29 @@ label{font-size:12px;color:#8892b0}
 //  MCP WebSocket client
 // ════════════════════════════════════════════════════════════════
 const WS_PORT = 9000;
-const WS_URL  = `ws://${location.hostname}:${WS_PORT}`;
+const WS_BASE = `ws://${location.hostname}:${WS_PORT}/`;
+// The MCP server requires an access token (issue #12).  Browsers cannot set
+// an Authorization header on a WebSocket, so it goes in the ?token= query.
+// Taken from this page's ?token= (then removed from the address bar) or the
+// value remembered in localStorage.
+const TOKEN_KEY = 'mcpToken';
+function loadToken() {
+  const params = new URLSearchParams(location.search);
+  const fromUrl = params.get('token');
+  if (fromUrl) {
+    try { localStorage.setItem(TOKEN_KEY, fromUrl); } catch (_) {}
+    params.delete('token');
+    const q = params.toString();
+    history.replaceState(null, '', location.pathname + (q ? '?' + q : '') + location.hash);
+    return fromUrl;
+  }
+  try { return localStorage.getItem(TOKEN_KEY) || ''; } catch (_) { return ''; }
+}
+function wsUrl(token) {
+  return token ? `${WS_BASE}?token=${encodeURIComponent(token)}` : WS_BASE;
+}
+const WS_CLOSE_UNAUTHORIZED = 4401;
+const WS_CLOSE_TOO_MANY     = 4429;
 
 class MCPClient {
   constructor(url) {
@@ -247,10 +276,25 @@ class MCPClient {
     this._connect();
   }
 
+  setUrl(url) {
+    this.url = url;
+    if (this.ws) { this.ws.onclose = null; this.ws.close(); }
+    clearTimeout(this.retryTimer);
+    this._connect();
+  }
+
   _connect() {
     this.ws = new WebSocket(this.url);
     this.ws.onopen    = () => { this.onStatus && this.onStatus('connected'); };
-    this.ws.onclose   = () => { this.onStatus && this.onStatus('disconnected'); setTimeout(()=>this._connect(), 3000); };
+    this.ws.onclose   = (e) => {
+      if (e.code === WS_CLOSE_UNAUTHORIZED) {
+        // Wrong or missing token: retrying with the same one cannot succeed.
+        this.onStatus && this.onStatus('unauthorized');
+        return;
+      }
+      this.onStatus && this.onStatus(e.code === WS_CLOSE_TOO_MANY ? 'busy' : 'disconnected');
+      this.retryTimer = setTimeout(()=>this._connect(), 3000);
+    };
     this.ws.onerror   = () => { this.onStatus && this.onStatus('error'); };
     this.ws.onmessage = (e) => {
       this.onLog && this.onLog(e.data, 'in');
@@ -297,17 +341,32 @@ class MCPClient {
 // ════════════════════════════════════════════════════════════════
 //  Bootstrap
 // ════════════════════════════════════════════════════════════════
-const mcp = new MCPClient(WS_URL);
+const mcp = new MCPClient(wsUrl(loadToken()));
 
 // Connection status dot
 const dot   = document.getElementById('status-dot');
 const label = document.getElementById('status-label');
+const tokenForm  = document.getElementById('token-form');
+const tokenInput = document.getElementById('token-input');
 mcp.onStatus = (s) => {
-  dot.className   = 'status-dot ' + (s === 'connected' ? 'connected' : s === 'error' ? 'error' : 'connecting');
-  label.textContent = s === 'connected' ? `Connected — ws://${location.hostname}:${WS_PORT}`
-                    : s === 'error'     ? 'WebSocket error — retrying…'
-                                        : 'Connecting…';
+  dot.className   = 'status-dot ' + (s === 'connected' ? 'connected'
+                                    : (s === 'error' || s === 'unauthorized') ? 'error' : 'connecting');
+  label.textContent = s === 'connected'    ? `Connected — ws://${location.hostname}:${WS_PORT}`
+                    : s === 'unauthorized' ? 'Access token required or invalid'
+                    : s === 'busy'         ? 'Too many clients connected — retrying…'
+                    : s === 'error'        ? 'WebSocket error — retrying…'
+                                           : 'Connecting…';
+  tokenForm.classList.toggle('show', s === 'unauthorized');
 };
+tokenForm.addEventListener('submit', (e) => {
+  e.preventDefault();
+  const t = tokenInput.value.trim();
+  if (!t) return;
+  try { localStorage.setItem(TOKEN_KEY, t); } catch (_) {}
+  tokenInput.value = '';
+  tokenForm.classList.remove('show');
+  mcp.setUrl(wsUrl(t));
+});
 
 // Tab switching
 document.querySelectorAll('.tab').forEach(tab => {

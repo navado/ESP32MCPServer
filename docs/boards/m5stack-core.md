@@ -132,7 +132,7 @@ small for the WebSocket transport + OTA):
 
 | Partition | Offset | Size | Contents |
 |---|---|---|---|
-| nvs | 0x9000 | 20 KB | WiFi credentials, OTA password (same offset as before) |
+| nvs | 0x9000 | 20 KB | WiFi credentials, OTA password, MCP tokens (same offset as before) |
 | otadata | 0xE000 | 8 KB | OTA slot selection |
 | app0 / app1 | 0x10000 / 0x1E0000 | 1.81 MB each | firmware (OTA A/B) |
 | spiffs | 0x3B0000 | 128 KB | LittleFS: web UI, bus-history config, metrics |
@@ -142,8 +142,8 @@ small for the WebSocket transport + OTA):
 > OTA, so flash **over USB** once (`pio run -e m5stack-core -t upload`, which writes the bootloader,
 > partition table and app).  The filesystem moves and shrinks (previously 1.4 MB at
 > 0x291000), so its contents are lost: re-upload the web UI with
-> `pio run -e m5stack-core -t uploadfs`.  NVS is unchanged, so WiFi credentials and the OTA
-> password are kept.
+> `pio run -e m5stack-core -t uploadfs`.  NVS is unchanged, so WiFi credentials, the OTA
+> password and MCP tokens are kept.
 
 ## Notes
 
@@ -154,3 +154,7 @@ small for the WebSocket transport + OTA):
   deep sleep.
 - **Basic vs Gray/Fire**: The Gray variant adds PSRAM; the Fire uses a different
   power management IC.  All three share the same GPIO map for I2C and UART.
+
+## Security
+
+MCP authentication is off by default; type `auth on` on the serial console to require an access token (it is generated and printed; `token show` prints it again). OTA uses a random per-device password printed at first boot (`ota show`). **There is no TLS on this board:** the token and data travel in clear text, so use it on a trusted network. See [Security](../../README.md#security).
