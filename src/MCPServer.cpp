@@ -593,15 +593,24 @@ void MCPServer::removeClient(uint8_t clientId) {
 // Broadcast
 // ---------------------------------------------------------------------------
 
-bool MCPServer::sendToClient(uint8_t clientId, const std::string& msg) {
-    if (!sendFunc_ || clientId >= MCP_HTTP_CLIENT_BASE) return false;
-    if (authEnforced_ && !hasClient(clientId)) return false;
-    sendFunc_(clientId, msg);
+bool MCPServer::deliver(uint8_t cid, const std::string& msg) {
+    if (extraSender_ && cid >= extraFirst_ && cid <= extraLast_) {
+        extraSender_(cid, msg);
+        return true;
+    }
+    if (!sendFunc_) return false;
+    sendFunc_(cid, msg);
     return true;
 }
 
+bool MCPServer::sendToClient(uint8_t clientId, const std::string& msg) {
+    if (clientId >= MCP_HTTP_CLIENT_BASE) return false;
+    if (authEnforced_ && !hasClient(clientId)) return false;
+    return deliver(clientId, msg);
+}
+
 void MCPServer::broadcastResourceUpdate(const std::string& uri) {
-    if (!sendFunc_) return;
+    if (!sendFunc_ && !extraSender_) return;
 
     auto it = subscriptions_.find(uri);
     if (it == subscriptions_.end()) return;
@@ -616,7 +625,7 @@ void MCPServer::broadcastResourceUpdate(const std::string& uri) {
     serializeJson(doc, notification);
 
     for (uint8_t cid : it->second) {
-        sendFunc_(cid, notification);
+        deliver(cid, notification);
     }
 }
 

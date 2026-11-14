@@ -25,6 +25,7 @@
 #include "AuthPolicy.h"
 #include "MCPServer.h"
 #include "McpHttpSession.h"
+#include "McpHttpEndpoint.h"
 #include <ESPAsyncWebServer.h>
 #include <atomic>
 #include <functional>
@@ -35,7 +36,7 @@
 
 namespace mcp {
 
-class McpHttpTransport {
+class McpHttpTransport : public McpHttpEndpoint {
 public:
     explicit McpHttpTransport(MCPServer& server) : server_(server) {}
 
@@ -53,18 +54,14 @@ public:
     static constexpr size_t   MAX_BODY_BYTES = 16 * 1024;
     static constexpr size_t   MAX_QUEUED     = 8;
 
-private:
-    struct Job {
-        enum class Kind { Message, Admit, Release };
-        Kind         kind = Kind::Message;
-        uint8_t      clientId = 0;
-        std::string  body;
-        std::string  authorization;   // for Admit
-        std::string  sessionId;       // for Admit failure cleanup
-        std::string  response;
-        std::atomic<bool> done{false};
-    };
+    using Job = McpHttpJob;
+    using PostRequest = McpPostRequest;
+    using PostOutcome = McpPostOutcome;
+    PostOutcome beginPost(const PostRequest& req) override;
+    int endSession(const std::string& authorization, const std::string& sessionId) override;
+    static std::string jsonError(const char* message) { return mcpJsonError(message); }
 
+private:
     void handlePost(AsyncWebServerRequest* req);
     void handleDelete(AsyncWebServerRequest* req);
     bool enqueue(const std::shared_ptr<Job>& job);

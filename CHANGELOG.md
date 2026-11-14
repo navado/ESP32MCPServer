@@ -6,6 +6,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- **TLS on the ESP32-S3 N16R8** — #23. `https://<device>/mcp` and `wss://<device>/ws` on
+  port 443 (esp_https_server), with the same sessions, tokens and limits as the plain
+  transports. A per-device EC P-256 certificate is generated on first boot and kept in NVS;
+  `tls show` prints its SHA-256 fingerprint, `tls rotate` replaces it, and the PEM is served at
+  `/tls.pem`. mbedTLS allocates from PSRAM on this build.
 - **Port-80 endpoints require the token when MCP auth is on** — #22. `/status`, `/ws`,
   `/discovery` and `/bus-history` reads accept either token; `/save` and the settings
   changes need the full-control token (`401` / `403`). The HTML pages stay public and ask

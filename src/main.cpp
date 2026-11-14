@@ -16,6 +16,10 @@
 #include "AuthPolicy.h"
 #include "McpHttpTransport.h"
 #include "McpTools.h"
+#if MCP_TLS
+#include "McpTlsServer.h"
+#include "TlsIdentity.h"
+#endif
 #include <Preferences.h>
 #include <esp_random.h>
 
@@ -146,6 +150,13 @@ SensorManager*    sensorManager = nullptr;
 DiscoveryManager  discoveryManager;
 OTAManager        otaManager;
 mcp::McpHttpTransport mcpHttp(mcpServer);   // Streamable HTTP at /mcp (port 80)
+#if MCP_TLS
+// https://<device>/mcp and wss://<device>/ws on port 443 (issue #23).
+mcp::McpTlsServer  mcpTls(mcpServer, mcpHttp);
+static std::string tlsCertPem;          // served at http://<device>/tls.pem
+static std::string tlsFingerprint;
+static mcp::auth::Credentials tlsCreds;   // set in setup(), used by startTls()
+#endif
 #if BOARD_HAS_BLE
 mcp::BLEScanner   bleScanner;
 #endif
@@ -239,6 +250,10 @@ static void handleSerialCommand(const String& line) {
         Serial.println("  token ro clear        remove the read-only token (reboots)");
         Serial.println("  ota show              print the OTA password");
         Serial.println("  ota rotate            new random OTA password (reboots)");
+#if MCP_TLS
+        Serial.println("  tls show              print the TLS certificate fingerprint and names");
+        Serial.println("  tls rotate            new TLS key and certificate (reboots)");
+#endif
         return;
     }
     if (cmd == "auth status") {
@@ -308,6 +323,23 @@ static void handleSerialCommand(const String& line) {
         rebootToApply();
         return;
     }
+#if MCP_TLS
+    if (cmd == "tls show") {
+        if (tlsFingerprint.empty()) {
+            Serial.println("[TLS] not running (no network yet, or setup failed)");
+        } else {
+            Serial.printf("[TLS] SHA-256 fingerprint: %s\n", tlsFingerprint.c_str());
+            Serial.println(tlsCertPem.c_str());
+        }
+        return;
+    }
+    if (cmd == "tls rotate") {
+        mcp::tls::forgetIdentity();
+        Serial.println("[TLS] Certificate removed; a new one is made on boot (new fingerprint).");
+        rebootToApply();
+        return;
+    }
+#endif
     Serial.printf("Unknown command '%s' (type 'help')\n", cmd.c_str());
 }
 
@@ -395,11 +427,58 @@ static void refreshFeaturesResource(bool force = false) {
     if (!force) mcpServer.broadcastResourceUpdate(FEATURES_URI);
 }
 
+#if MCP_TLS
+// Start https://.../mcp and wss://.../ws (issue #23).  Needs the network up:
+// the certificate names the device's hostname and IP address.
+static void startTls(const mcp::auth::Credentials& mcpCreds) {
+    {
+        mcp::tls::Identity id;
+        std::string err;
+        const std::string host = discoveryManager.getConfig().hostname.c_str();
+        const std::string ip = networkManager.getIPAddress().c_str();
+        if (!mcp::tls::loadOrCreateIdentity(host, ip, false, id, err)) {
+            Serial.printf("[TLS] certificate setup failed: %s; TLS disabled\n", err.c_str());
+            log_e("[TLS] certificate setup failed: %s", err.c_str());
+        } else {
+            mcpTls.setCredentials(mcpCreds);
+            if (mcpTls.begin(id.certPem, id.keyPem, 443)) {
+                tlsCertPem = id.certPem;
+                tlsFingerprint = id.fingerprint;
+                std::string names;
+                for (const auto& n : id.names) names += (names.empty() ? "" : ", ") + n;
+                Serial.printf("[TLS] https://%s/mcp and wss://%s/ws on port 443\n", ip.c_str(), ip.c_str());
+                Serial.printf("[TLS] certificate for %s\n", names.c_str());
+                Serial.printf("[TLS] SHA-256 fingerprint: %s\n", id.fingerprint.c_str());
+                log_i("[TLS] port 443 up, certificate for %s, SHA-256 %s", names.c_str(), id.fingerprint.c_str());
+                bool ipCovered = false;
+                for (const auto& n : id.names) ipCovered |= (n == ip);
+                if (!ipCovered)
+                    Serial.printf("[TLS] note: %s is not in the certificate (made for another address); "
+                                  "use %s.local, or `tls rotate`\n", ip.c_str(), host.c_str());
+            } else {
+                Serial.println("[TLS] could not start the HTTPS server; TLS disabled");
+                log_e("[TLS] could not start the HTTPS server");
+            }
+        }
+    }
+}
+#endif
+
 void mcpTask(void* parameter) {
     uint32_t lastFeatureCheck = 0;
     while (true) {
         mcpServer.handleClient();
         mcpHttp.pump();
+#if MCP_TLS
+        {
+            static bool tlsStarted = false;
+            if (!tlsStarted && networkManager.isConnected()) {
+                tlsStarted = true;
+                startTls(tlsCreds);
+            }
+            mcpTls.pump();
+        }
+#endif
 #if BOARD_HAS_BLE
         pushBleNotifications();
 #endif
@@ -444,6 +523,11 @@ static std::string buildServicesResponse(uint32_t id,
 void setup() {
     Serial.begin(115200);
     Serial.println("Starting up...");
+#if MCP_TLS
+    // TLS sessions need ~40 KB of buffers each: keep them out of the
+    // internal heap (issue #23).  Before anything uses mbedTLS.
+    if (psramFound()) mcp::tls::useSpiramForMbedtls();
+#endif
 
     // Initialise the BLE stack FIRST, while the heap is still unfragmented.
     // Bluetooth needs large contiguous allocations (bt_workqueue, controller
@@ -570,6 +654,9 @@ void setup() {
     // (WebSocket :9000 and Streamable HTTP /mcp) are authenticated from the
     // first request.
     const mcp::auth::Credentials mcpCreds = loadMcpCredentials();
+#if MCP_TLS
+    tlsCreds = mcpCreds;
+#endif
     mcpHttp.setCredentials(mcpCreds);
     networkManager.setCredentials(mcpCreds);   // port-80 endpoints (#22)
     // An HTTP session that owns a BLE scan, link or subscription is never
@@ -584,7 +671,17 @@ void setup() {
         return false;
 #endif
     });
-    networkManager.setRouteRegistrar([](AsyncWebServer& web) { mcpHttp.registerRoutes(web); });
+    networkManager.setRouteRegistrar([](AsyncWebServer& web) {
+        mcpHttp.registerRoutes(web);
+#if MCP_TLS
+        // The device's self-signed certificate, for clients to trust or pin.
+        // Public data; check the fingerprint against `tls show` on serial.
+        web.on("/tls.pem", HTTP_GET, [](AsyncWebServerRequest* req) {
+            if (tlsCertPem.empty()) { req->send(404, "text/plain", "TLS not running"); return; }
+            req->send(200, "application/x-pem-file", tlsCertPem.c_str());
+        });
+#endif
+    });
 
     // Start network manager
     networkManager.begin();
@@ -603,6 +700,9 @@ void setup() {
     mcpServer.setMaxClients(MCP_MAX_CLIENTS);
     mcpServer.setRateLimit(MCP_RATE_BURST, MCP_RATE_PER_SEC);
     mcpServer.begin(networkManager.isConnected());
+#if MCP_TLS
+    // TLS starts from the MCP task once WiFi is connected (startTls()).
+#endif
     // Immediately announce MCP capability so LAN listeners learn the server
     // is ready (sensor list is still empty at this point; will be updated
     // after the I2C scan below).

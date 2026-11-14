@@ -64,16 +64,21 @@ void McpHttpTransport::registerRoutes(AsyncWebServer& web) {
                                   [this](AsyncWebServerRequest* r) { handleDelete(r); }));
 }
 
-void McpHttpTransport::sendJsonError(AsyncWebServerRequest* req, int status,
-                                     const char* message) {
+std::string mcpJsonError(const char* message) {
     JsonDocument doc;
     doc["jsonrpc"] = "2.0";
     doc["id"]      = nullptr;
     doc["error"]["code"]    = -32600;
     doc["error"]["message"] = message;
-    String out;
+    std::string out;
     serializeJson(doc, out);
-    AsyncWebServerResponse* r = req->beginResponse(status, "application/json", out);
+    return out;
+}
+
+void McpHttpTransport::sendJsonError(AsyncWebServerRequest* req, int status,
+                                     const char* message) {
+    AsyncWebServerResponse* r =
+        req->beginResponse(status, "application/json", jsonError(message).c_str());
     if (status == 401) r->addHeader("WWW-Authenticate", "Bearer realm=\"mcp\"");
     req->send(r);
 }
@@ -87,29 +92,24 @@ bool McpHttpTransport::enqueue(const std::shared_ptr<Job>& job) {
     return true;
 }
 
-void McpHttpTransport::handlePost(AsyncWebServerRequest* req) {
-    const char* body = static_cast<const char*>(req->_tempObject);
-    if (!body) {
-        sendJsonError(req, req->contentLength() > MAX_BODY_BYTES ? 413 : 400,
-                      req->contentLength() > MAX_BODY_BYTES ? "Request too large"
-                                                             : "Missing JSON-RPC body");
-        return;
+McpHttpTransport::PostOutcome McpHttpTransport::beginPost(const PostRequest& in) {
+    PostOutcome out;
+    auto fail = [&out](int status, const char* msg) {
+        out.status = status;
+        out.error = msg;
+        return out;
+    };
+    if (!in.body) {
+        return in.contentLength > MAX_BODY_BYTES ? fail(413, "Request too large")
+                                                 : fail(400, "Missing JSON-RPC body");
     }
-
     // DNS-rebinding protection: a browser page from another host must not
     // reach the device.
-    if (!http::originAllowed(headerValue(req, "Origin").c_str(), req->host().c_str())) {
-        sendJsonError(req, 403, "Forbidden origin");
-        return;
-    }
+    if (!http::originAllowed(in.origin, in.host)) return fail(403, "Forbidden origin");
 
     // Bearer token on every request (same tokens as the WebSocket).
-    const String authz = headerValue(req, "Authorization");
-    const auth::Access access = auth::authenticate(creds_, authz.c_str(), "");
-    if (access == auth::Access::None) {
-        sendJsonError(req, 401, "Unauthorized");
-        return;
-    }
+    const auth::Access access = auth::authenticate(creds_, in.authorization, "");
+    if (access == auth::Access::None) return fail(401, "Unauthorized");
 
     // Peek at the message: initialize starts a session; notifications and
     // responses get 202 with no body.
@@ -117,20 +117,16 @@ void McpHttpTransport::handlePost(AsyncWebServerRequest* req) {
     filter["method"] = true;
     filter["id"]     = true;
     JsonDocument peek;
-    if (deserializeJson(peek, body, DeserializationOption::Filter(filter))) {
-        sendJsonError(req, 400, "Parse error");
-        return;
-    }
+    if (deserializeJson(peek, in.body, DeserializationOption::Filter(filter)))
+        return fail(400, "Parse error");
     const bool isInitialize = peek["method"].is<const char*>() &&
                               strcmp(peek["method"].as<const char*>(), "initialize") == 0;
-    const bool expectsReply = peek["method"].is<const char*>() && !peek["id"].isNull();
+    out.expectsReply = peek["method"].is<const char*>() && !peek["id"].isNull();
 
     auto job = std::make_shared<Job>();
-    job->body = body;
-    String newSessionId;
-    const String sid = headerValue(req, kSessionHeader);
+    job->body = in.body;
 
-    if (isInitialize && sid.isEmpty()) {
+    if (isInitialize && in.sessionId.empty()) {
         std::lock_guard<std::mutex> lock(mu_);
         int evicted = -1;
         const http::Session* s =
@@ -139,10 +135,7 @@ void McpHttpTransport::handlePost(AsyncWebServerRequest* req) {
                                  const uint32_t bit = cid - MCP_HTTP_CLIENT_BASE;
                                  return bit >= 32 || !(pinnedMask_.load() & (1u << bit));
                              });
-        if (!s) {
-            sendJsonError(req, 503, "Too many MCP sessions");
-            return;
-        }
+        if (!s) return fail(503, "Too many MCP sessions");
         if (evicted >= 0) {
             // Release the evicted session's server state before the new
             // session's Admit job runs (same queue, so in order).
@@ -151,39 +144,59 @@ void McpHttpTransport::handlePost(AsyncWebServerRequest* req) {
             rel->clientId = static_cast<uint8_t>(evicted);
             queue_.push_back(rel);
         }
-        newSessionId       = s->id.c_str();
+        out.newSessionId   = s->id;
         job->kind          = Job::Kind::Admit;
         job->clientId      = s->clientId;
-        job->authorization = authz.c_str();
+        job->authorization = in.authorization;
         job->sessionId     = s->id;
     } else {
-        if (sid.isEmpty()) {
-            sendJsonError(req, 400, "Missing Mcp-Session-Id");
-            return;
-        }
+        if (in.sessionId.empty()) return fail(400, "Missing Mcp-Session-Id");
         std::lock_guard<std::mutex> lock(mu_);
-        const http::Session* s = sessions_.find(sid.c_str(), millis());
-        if (!s) {
-            // Spec: 404 tells the client to start a new session.
-            sendJsonError(req, 404, "Unknown or expired session");
-            return;
-        }
-        if (s->access != access) {
-            sendJsonError(req, 401, "Token does not match the session");
-            return;
-        }
+        const http::Session* s = sessions_.find(in.sessionId, millis());
+        // Spec: 404 tells the client to start a new session.
+        if (!s) return fail(404, "Unknown or expired session");
+        if (s->access != access) return fail(401, "Token does not match the session");
         job->clientId = s->clientId;
     }
 
-    if (!enqueue(job)) {
-        sendJsonError(req, 503, "Server busy");
+    if (!enqueue(job)) return fail(503, "Server busy");
+    out.job = job;
+    return out;
+}
+
+int McpHttpTransport::endSession(const std::string& authorization, const std::string& sessionId) {
+    if (auth::authenticate(creds_, authorization, "") == auth::Access::None) return 401;
+    int clientId;
+    {
+        std::lock_guard<std::mutex> lock(mu_);
+        clientId = sessions_.remove(sessionId);
+    }
+    if (clientId < 0) return 404;
+    auto job = std::make_shared<Job>();
+    job->kind     = Job::Kind::Release;
+    job->clientId = static_cast<uint8_t>(clientId);
+    enqueue(job);  // always accepted for Release
+    return 204;
+}
+
+void McpHttpTransport::handlePost(AsyncWebServerRequest* req) {
+    PostRequest in;
+    in.body          = static_cast<const char*>(req->_tempObject);
+    in.contentLength = req->contentLength();
+    in.origin        = headerValue(req, "Origin").c_str();
+    in.host          = req->host().c_str();
+    in.authorization = headerValue(req, "Authorization").c_str();
+    in.sessionId     = headerValue(req, kSessionHeader).c_str();
+    PostOutcome out = beginPost(in);
+    if (out.status != 200) {
+        sendJsonError(req, out.status, out.error.c_str());
         return;
     }
-
-    if (!expectsReply) {
+    if (!out.expectsReply) {
         req->send(202);
         return;
     }
+    auto job = out.job;
 
     // Most requests complete within a few ms on the MCP task; wait briefly so
     // the answer goes out in one plain response.  Slow ones (GATT results,
@@ -209,31 +222,18 @@ void McpHttpTransport::handlePost(AsyncWebServerRequest* req) {
                 return n;
             });
     }
-    if (newSessionId.length()) resp->addHeader(kSessionHeader, newSessionId);
+    if (!out.newSessionId.empty()) resp->addHeader(kSessionHeader, out.newSessionId.c_str());
     req->send(resp);
 }
 
 void McpHttpTransport::handleDelete(AsyncWebServerRequest* req) {
-    const String authz = headerValue(req, "Authorization");
-    if (auth::authenticate(creds_, authz.c_str(), "") == auth::Access::None) {
-        sendJsonError(req, 401, "Unauthorized");
+    const int status = endSession(headerValue(req, "Authorization").c_str(),
+                                  headerValue(req, kSessionHeader).c_str());
+    if (status == 204) {
+        req->send(204);
         return;
     }
-    const String sid = headerValue(req, kSessionHeader);
-    int clientId;
-    {
-        std::lock_guard<std::mutex> lock(mu_);
-        clientId = sessions_.remove(sid.c_str());
-    }
-    if (clientId < 0) {
-        sendJsonError(req, 404, "Unknown or expired session");
-        return;
-    }
-    auto job = std::make_shared<Job>();
-    job->kind     = Job::Kind::Release;
-    job->clientId = static_cast<uint8_t>(clientId);
-    enqueue(job);  // always accepted for Release
-    req->send(204);
+    sendJsonError(req, status, status == 401 ? "Unauthorized" : "Unknown or expired session");
 }
 
 void McpHttpTransport::pump() {
