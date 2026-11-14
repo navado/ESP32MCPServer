@@ -120,6 +120,16 @@ static const char* const kReadOnlyMethods[] = {
     "ble/scan/poll", "ble/connect/results",
 };
 
+int httpEndpointStatus(const Credentials& creds, HttpNeed need,
+                       const std::string& authorizationHeader, const std::string& url,
+                       bool provisioning) {
+    if (!creds.required || need == HttpNeed::Public || provisioning) return 0;
+    const Access a = authenticate(creds, authorizationHeader, url);
+    if (a == Access::None) return 401;
+    if (need == HttpNeed::Full && a != Access::Full) return 403;
+    return 0;
+}
+
 bool methodAllowed(Access access, const std::string& method) {
     if (access == Access::Full) return true;
     if (access == Access::None) return false;

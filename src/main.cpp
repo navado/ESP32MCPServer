@@ -564,6 +564,7 @@ void setup() {
     // first request.
     const mcp::auth::Credentials mcpCreds = loadMcpCredentials();
     mcpHttp.setCredentials(mcpCreds);
+    networkManager.setCredentials(mcpCreds);   // port-80 endpoints (#22)
     // An HTTP session that owns a BLE scan, link or subscription is never
     // evicted to make room for another session (it would drop the link).
     mcpHttp.setPinnedCheck([](uint8_t cid) {

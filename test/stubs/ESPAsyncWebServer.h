@@ -65,6 +65,8 @@ public:
     template<typename FS>
     void send(FS& /*fs*/, const char*   /*path*/, const char* /*type*/ = nullptr) {}
     void redirect(const String& /*url*/) {}
+    bool   hasHeader(const char* /*name*/) const { return false; }
+    String header(const char* /*name*/) const { return String(""); }
     String url()  const { return String("/"); }
     String host() const { return String("localhost"); }
 
@@ -101,6 +103,7 @@ public:
 
     explicit AsyncWebSocket(const char* /*url*/) {}
     void    onEvent(EventCallback /*cb*/) {}
+    void    setFilter(std::function<bool(AsyncWebServerRequest*)> /*fn*/) {}
     void    textAll(const String& /*msg*/) {}
     void    textAll(const char* /*msg*/, size_t /*len*/ = 0) {}
     void    cleanupClients(size_t /*maxClients*/ = 0) {}

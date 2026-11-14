@@ -78,7 +78,43 @@ void NetworkManager::begin() {
     setupWebServer();
 }
 
+bool NetworkManager::provisioning() const {
+    return state == NetworkState::AP_MODE && !credentials.valid;
+}
+
+bool NetworkManager::allow(AsyncWebServerRequest* request, mcp::auth::HttpNeed need) {
+    std::string authz;
+    if (request->hasHeader("Authorization")) authz = request->header("Authorization").c_str();
+    std::string url = "/";
+    if (request->hasParam("token")) {
+        url += "?token=";
+        url += request->getParam("token")->value().c_str();
+    }
+    const int status = mcp::auth::httpEndpointStatus(creds_, need, authz, url, provisioning());
+    if (status == 0) return true;
+    AsyncWebServerResponse* resp = request->beginResponse(
+        status, "application/json",
+        status == 401 ? "{\"error\":\"Unauthorized: send Authorization: Bearer <token>\"}"
+                      : "{\"error\":\"Forbidden: this needs the full-control token\"}");
+    if (status == 401) resp->addHeader("WWW-Authenticate", "Bearer");
+    request->send(resp);
+    return false;
+}
+
 void NetworkManager::setupWebServer() {
+    using mcp::auth::HttpNeed;
+    // /ws pushes network status: a read.  Browsers pass ?token= (no headers
+    // on a WebSocket upgrade).  A refused upgrade is not handled (404).
+    ws.setFilter([this](AsyncWebServerRequest* request) {
+        std::string url = "/";
+        if (request->hasParam("token")) {
+            url += "?token=";
+            url += request->getParam("token")->value().c_str();
+        }
+        std::string authz;
+        if (request->hasHeader("Authorization")) authz = request->header("Authorization").c_str();
+        return mcp::auth::httpEndpointStatus(creds_, HttpNeed::Read, authz, url, provisioning()) == 0;
+    });
     ws.onEvent([this](AsyncWebSocket* server, AsyncWebSocketClient* client,
                      AwsEventType type, void* arg, uint8_t* data, size_t len) {
         this->onWebSocketEvent(server, client, type, arg, data, len);
@@ -91,10 +127,12 @@ void NetworkManager::setupWebServer() {
     });
     
     server.on("/save", HTTP_POST, [this](AsyncWebServerRequest *request) {
+        if (!allow(request, HttpNeed::Full)) return;
         this->handleSave(request);
     });
     
     server.on("/status", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        if (!allow(request, HttpNeed::Read)) return;
         this->handleStatus(request);
     });
 
@@ -107,18 +145,22 @@ void NetworkManager::setupWebServer() {
     });
 
     server.on("/discovery", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        if (!allow(request, HttpNeed::Read)) return;
         this->handleDiscoveryGet(request);
     });
 
     server.on("/discovery", HTTP_POST, [this](AsyncWebServerRequest *request) {
+        if (!allow(request, HttpNeed::Full)) return;
         this->handleDiscoveryPost(request);
     });
 
     server.on("/bus-history", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        if (!allow(request, HttpNeed::Read)) return;
         this->handleBusHistoryGet(request);
     });
 
     server.on("/bus-history", HTTP_POST, [this](AsyncWebServerRequest *request) {
+        if (!allow(request, HttpNeed::Full)) return;
         this->handleBusHistoryPost(request);
     });
 

@@ -248,6 +248,36 @@ void test_generate_token_hex(void) {
     }
 }
 
+// --- port-80 endpoints (#22) -----------------------------------------------
+
+void test_http_endpoints_auth_off_allows_everything(void) {
+    Credentials c = creds();
+    c.required = false;
+    TEST_ASSERT_EQUAL(0, httpEndpointStatus(c, HttpNeed::Full, "", "/save", false));
+    TEST_ASSERT_EQUAL(0, httpEndpointStatus(c, HttpNeed::Read, "", "/status", false));
+}
+
+void test_http_endpoints_auth_on(void) {
+    Credentials c = creds();
+    const std::string full = "Bearer full-0123456789abcdef";
+    const std::string ro   = "Bearer read-0123456789abcdef";
+    TEST_ASSERT_EQUAL(0,   httpEndpointStatus(c, HttpNeed::Public, "", "/", false));
+    TEST_ASSERT_EQUAL(401, httpEndpointStatus(c, HttpNeed::Read, "", "/status", false));
+    TEST_ASSERT_EQUAL(401, httpEndpointStatus(c, HttpNeed::Read, "Bearer wrong", "/status", false));
+    TEST_ASSERT_EQUAL(0,   httpEndpointStatus(c, HttpNeed::Read, ro, "/status", false));
+    TEST_ASSERT_EQUAL(0,   httpEndpointStatus(c, HttpNeed::Read, full, "/status", false));
+    TEST_ASSERT_EQUAL(401, httpEndpointStatus(c, HttpNeed::Full, "", "/save", false));
+    TEST_ASSERT_EQUAL(403, httpEndpointStatus(c, HttpNeed::Full, ro, "/save", false));
+    TEST_ASSERT_EQUAL(0,   httpEndpointStatus(c, HttpNeed::Full, full, "/save", false));
+    // ?token= for browser WebSockets
+    TEST_ASSERT_EQUAL(0,   httpEndpointStatus(c, HttpNeed::Read, "", "/ws?token=read-0123456789abcdef", false));
+}
+
+void test_http_endpoints_open_while_provisioning(void) {
+    Credentials c = creds();
+    TEST_ASSERT_EQUAL(0, httpEndpointStatus(c, HttpNeed::Full, "", "/save", true));
+}
+
 int main(int, char**) {
     UNITY_BEGIN();
     RUN_TEST(test_extract_bearer);
@@ -273,5 +303,8 @@ int main(int, char**) {
     RUN_TEST(test_lockout_table_rotation_does_not_shed_failures);
     RUN_TEST(test_lockout_table_forgets_quiet_entries);
     RUN_TEST(test_generate_token_hex);
+    RUN_TEST(test_http_endpoints_auth_off_allows_everything);
+    RUN_TEST(test_http_endpoints_auth_on);
+    RUN_TEST(test_http_endpoints_open_while_provisioning);
     return UNITY_END();
 }

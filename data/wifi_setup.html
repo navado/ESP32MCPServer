@@ -139,12 +139,34 @@
     </div>
 
     <script>
+
+// MCP access token (issue #22).  With authentication on, the status and
+// settings endpoints need a token: it is sent as a bearer header, asked for
+// on 401/403 and remembered (same key as the dashboard).
+const TOKEN_KEY = 'mcpToken';
+function storedToken() {
+  try { return localStorage.getItem(TOKEN_KEY) || ''; } catch (_) { return ''; }
+}
+async function authFetch(url, opts = {}) {
+  const go = (t) => fetch(url, t ? { ...opts, headers: { ...(opts.headers || {}), Authorization: 'Bearer ' + t } } : opts);
+  let r = await go(storedToken());
+  if (r.status === 401 || r.status === 403) {
+    const t = (prompt(r.status === 403 ? 'This change needs the full-control MCP token'
+                                         : 'MCP access token (serial console: token show)') || '').trim();
+    if (t) {
+      try { localStorage.setItem(TOKEN_KEY, t); } catch (_) {}
+      r = await go(t);
+    }
+  }
+  return r;
+}
         const form = document.getElementById('wifi-form');
         const status = document.getElementById('status');
         let ws = null;
 
         function connectWebSocket() {
-            ws = new WebSocket(`ws://${window.location.hostname}/ws`);
+            const t = storedToken();
+            ws = new WebSocket(`ws://${window.location.hostname}/ws` + (t ? `?token=${encodeURIComponent(t)}` : ''));
             
             ws.onmessage = function(event) {
                 const data = JSON.parse(event.data);
@@ -182,7 +204,7 @@
             const formData = new FormData(form);
             
             try {
-                const response = await fetch('/save', {
+                const response = await authFetch('/save', {
                     method: 'POST',
                     body: formData
                 });
@@ -200,7 +222,7 @@
         };
 
         // Initial status check and WebSocket connection
-        fetch('/status')
+        authFetch('/status')
             .then(response => response.json())
             .then(data => {
                 updateStatus(data);
@@ -220,7 +242,7 @@
 
         async function loadDiscoverySettings() {
             try {
-                const resp = await fetch('/discovery');
+                const resp = await authFetch('/discovery');
                 if (!resp.ok) return;
                 const d = await resp.json();
                 if (d.hostname) {
@@ -245,7 +267,7 @@
             e.preventDefault();
             const formData = new FormData(document.getElementById('discovery-form'));
             try {
-                const resp = await fetch('/discovery', { method: 'POST', body: formData });
+                const resp = await authFetch('/discovery', { method: 'POST', body: formData });
                 if (resp.ok) {
                     const d = await resp.json();
                     discoveryStatusEl.innerHTML =

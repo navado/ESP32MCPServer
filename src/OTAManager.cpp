@@ -54,11 +54,6 @@ void OTAManager::setPassword(const String& newPassword) {
 // ---------------------------------------------------------------------------
 
 void OTAManager::registerRoutes(AsyncWebServer& server) {
-    // Public: OTA upload page
-    server.on("/ota", HTTP_GET, [this](AsyncWebServerRequest* req) {
-        handlePageGet(req);
-    });
-
     // Public: firmware status
     server.on("/ota/status", HTTP_GET, [this](AsyncWebServerRequest* req) {
         handleStatusGet(req);
@@ -78,6 +73,13 @@ void OTAManager::registerRoutes(AsyncWebServer& server) {
     });
     server.on("/ota/config", HTTP_POST, [this](AsyncWebServerRequest* req) {
         handleConfigPost(req);
+    });
+
+    // Public: OTA upload page.  Registered LAST: AsyncWebServer matches "/ota"
+    // as a prefix of "/ota/...", so registered first it answered GET
+    // /ota/status and /ota/config with this page (issue #21).
+    server.on("/ota", HTTP_GET, [this](AsyncWebServerRequest* req) {
+        handlePageGet(req);
     });
 }
 
