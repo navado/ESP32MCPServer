@@ -26,13 +26,28 @@ struct Session {
 class SessionTable {
 public:
     // `capacity` concurrent sessions; idle sessions expire after `idleMs`.
-    SessionTable(size_t capacity = 4, uint32_t idleMs = 10u * 60u * 1000u);
+    // When full, create() may evict the least recently used session if it
+    // has been idle for at least `evictIdleMs`.
+    SessionTable(size_t capacity = 4, uint32_t idleMs = 10u * 60u * 1000u,
+                 uint32_t evictIdleMs = 1000);
 
-    // Create a session.  Returns nullptr when every slot is in use (expired
-    // sessions keep their slot until expire() hands their client id back for
-    // release).  `rnd` supplies randomness for the id.
+    // Create a session.  `rnd` supplies randomness for the id.
+    //
+    // When every slot is in use and `evictedClientId` is given, the least
+    // recently used session idle for >= evictIdleMs is replaced, and its
+    // client id is stored in *evictedClientId (else -1) so the caller can
+    // release its server state first; the evicted client gets 404 on its
+    // next request and starts a new session, as the spec requires.  Many
+    // clients (the MCP Inspector CLI, a restarted Claude Code) never send
+    // DELETE, so without eviction their sessions would hold every slot until
+    // the idle timeout.
+    //
+    // Returns nullptr when no slot can be had.  Slots are never reclaimed
+    // silently: an expired or evicted session's client id always comes back
+    // to the caller (here or from expire()).
     const Session* create(auth::Access access, uint32_t nowMs,
-                          const std::function<uint32_t()>& rnd);
+                          const std::function<uint32_t()>& rnd,
+                          int* evictedClientId = nullptr);
 
     // Live session by id (touches lastUsedMs), or nullptr.
     const Session* find(const std::string& id, uint32_t nowMs);
@@ -52,6 +67,7 @@ private:
     };
     std::vector<Slot> slots_;
     uint32_t idleMs_;
+    uint32_t evictIdleMs_;
 };
 
 // Origin validation against DNS rebinding (MCP spec: servers MUST validate

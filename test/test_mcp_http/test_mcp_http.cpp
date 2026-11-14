@@ -91,6 +91,42 @@ void test_session_remove(void) {
     TEST_ASSERT_EQUAL(0, (int)t.size());
 }
 
+void test_session_full_table_evicts_least_recently_used(void) {
+    SessionTable t(2, 60000, 1000);
+    std::string a = t.create(auth::Access::Full, 0, rnd)->id;
+    const Session* b = t.create(auth::Access::Full, 100, rnd);
+    std::string bid = b->id;
+    int bcid = b->clientId;
+    t.find(a, 2000);                          // a used recently, b idle since 100
+    int evicted = -2;
+    const Session* c = t.create(auth::Access::ReadOnly, 2500, rnd, &evicted);
+    TEST_ASSERT_NOT_NULL(c);
+    TEST_ASSERT_EQUAL(bcid, evicted);         // caller must release b's state
+    TEST_ASSERT_EQUAL(bcid, c->clientId);     // c takes b's slot
+    TEST_ASSERT_TRUE(c->access == auth::Access::ReadOnly);
+    TEST_ASSERT_NULL(t.find(bid, 2600));      // b now gets 404
+    TEST_ASSERT_NOT_NULL(t.find(a, 2600));
+    TEST_ASSERT_EQUAL(2, (int)t.size());
+}
+
+void test_session_eviction_spares_sessions_in_use(void) {
+    SessionTable t(1, 60000, 1000);
+    t.create(auth::Access::Full, 0, rnd);
+    int evicted = -2;
+    TEST_ASSERT_NULL(t.create(auth::Access::Full, 500, rnd, &evicted));  // idle < 1 s
+    TEST_ASSERT_EQUAL(-1, evicted);
+    TEST_ASSERT_NOT_NULL(t.create(auth::Access::Full, 1500, rnd, &evicted));
+    TEST_ASSERT_EQUAL(MCP_HTTP_CLIENT_BASE, evicted);
+}
+
+void test_session_free_slot_preferred_over_eviction(void) {
+    SessionTable t(2, 60000, 1000);
+    t.create(auth::Access::Full, 0, rnd);
+    int evicted = -2;
+    TEST_ASSERT_NOT_NULL(t.create(auth::Access::Full, 5000, rnd, &evicted));
+    TEST_ASSERT_EQUAL(-1, evicted);
+}
+
 // --- origin -------------------------------------------------------------------
 
 void test_host_only(void) {
@@ -153,6 +189,9 @@ int main(int, char**) {
     RUN_TEST(test_session_create_never_reclaims_silently);
     RUN_TEST(test_session_use_keeps_it_alive);
     RUN_TEST(test_session_remove);
+    RUN_TEST(test_session_full_table_evicts_least_recently_used);
+    RUN_TEST(test_session_eviction_spares_sessions_in_use);
+    RUN_TEST(test_session_free_slot_preferred_over_eviction);
     RUN_TEST(test_host_only);
     RUN_TEST(test_origin_allowed);
     RUN_TEST(test_tool_schemas_are_valid_object_schemas);

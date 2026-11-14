@@ -132,11 +132,20 @@ void McpHttpTransport::handlePost(AsyncWebServerRequest* req) {
 
     if (isInitialize && sid.isEmpty()) {
         std::lock_guard<std::mutex> lock(mu_);
+        int evicted = -1;
         const http::Session* s =
-            sessions_.create(access, millis(), []() { return esp_random(); });
+            sessions_.create(access, millis(), []() { return esp_random(); }, &evicted);
         if (!s) {
             sendJsonError(req, 503, "Too many MCP sessions");
             return;
+        }
+        if (evicted >= 0) {
+            // Release the evicted session's server state before the new
+            // session's Admit job runs (same queue, so in order).
+            auto rel = std::make_shared<Job>();
+            rel->kind     = Job::Kind::Release;
+            rel->clientId = static_cast<uint8_t>(evicted);
+            queue_.push_back(rel);
         }
         newSessionId       = s->id.c_str();
         job->kind          = Job::Kind::Admit;

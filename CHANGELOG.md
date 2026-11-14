@@ -90,6 +90,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   runtime, by the memory plan. — #9, #11
 
 ### Fixed
+- **Streamable HTTP sessions no longer run out** — #13. Clients that exit without
+  `DELETE /mcp` (the MCP Inspector CLI does this on every run) held all 4 sessions for
+  10 minutes, so further clients got `503 Too many MCP sessions`, and the leaked sessions
+  also counted toward the WebSocket limit (`4429`). A full table now replaces the least
+  recently used idle session, and HTTP sessions no longer use WebSocket client slots.
 - Boot loop on startup: lwIP was used before initialisation (`Invalid mbox`). — #9
 - Uncaught exceptions in MCP method handlers rebooted the board; they now return a
   JSON-RPC `-32603` error. — #9

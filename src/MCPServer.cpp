@@ -152,8 +152,12 @@ MCPServer::Admission MCPServer::admitClient(uint8_t clientId,
                               : auth::Access::Full;
     if (access == auth::Access::None) return Admission::Unauthorized;
     // A reused slot replaces its previous occupant; otherwise enforce the cap.
-    if (clients_.find(clientId) == clients_.end() && clients_.size() >= maxClients_) {
-        return Admission::TooManyClients;
+    // The cap counts WebSocket clients only: HTTP sessions have their own
+    // table and limit (McpHttpSession), and must not use up WebSocket slots.
+    if (clientId < MCP_HTTP_CLIENT_BASE && clients_.find(clientId) == clients_.end()) {
+        size_t ws = 0;
+        for (const auto& kv : clients_) ws += kv.first < MCP_HTTP_CLIENT_BASE ? 1 : 0;
+        if (ws >= maxClients_) return Admission::TooManyClients;
     }
     ClientState st;
     st.access  = access;

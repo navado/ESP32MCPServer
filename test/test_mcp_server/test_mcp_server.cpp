@@ -286,6 +286,18 @@ void test_max_clients_enforced_and_slot_reuse_allowed() {
     TEST_ASSERT_TRUE(server->admitClient(2, tok, "/") == MCPServer::Admission::Accepted);
 }
 
+void test_http_sessions_do_not_use_websocket_slots() {
+    server->setCredentials(secCreds());
+    server->setMaxClients(2);
+    const char* tok = "Bearer full-0123456789abcdef";
+    for (uint8_t i = 0; i < 4; ++i)
+        TEST_ASSERT_TRUE(server->admitClient(MCP_HTTP_CLIENT_BASE + i, tok, "") ==
+                         MCPServer::Admission::Accepted);
+    TEST_ASSERT_TRUE(server->admitClient(0, tok, "/") == MCPServer::Admission::Accepted);
+    TEST_ASSERT_TRUE(server->admitClient(1, tok, "/") == MCPServer::Admission::Accepted);
+    TEST_ASSERT_TRUE(server->admitClient(2, tok, "/") == MCPServer::Admission::TooManyClients);
+}
+
 void test_removed_client_loses_access() {
     server->setCredentials(secCreds());
     server->admitClient(1, "Bearer full-0123456789abcdef", "/");
@@ -521,6 +533,7 @@ int runUnityTests() {
     RUN_TEST(test_token_via_header_or_query_admits);
     RUN_TEST(test_read_only_client_cannot_call_full_control_methods);
     RUN_TEST(test_max_clients_enforced_and_slot_reuse_allowed);
+    RUN_TEST(test_http_sessions_do_not_use_websocket_slots);
     RUN_TEST(test_removed_client_loses_access);
     RUN_TEST(test_per_client_rate_limit);
     RUN_TEST(test_initialize_echoes_supported_version);

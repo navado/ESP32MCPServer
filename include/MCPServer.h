@@ -144,7 +144,8 @@ public:
     void setCredentials(const auth::Credentials& creds);
     // Per-client token bucket: `capacity` burst, `perSec` sustained.
     void setRateLimit(uint32_t capacity, uint32_t perSec);
-    // Maximum concurrently admitted clients (default 4).
+    // Maximum concurrently admitted WebSocket clients (default 4).  HTTP
+    // sessions are limited by the transport's session table instead.
     void setMaxClients(size_t n) { maxClients_ = n; }
     // Time source for rate limiting (defaults to millis()).
     void setClock(std::function<uint32_t()> clock) { clock_ = std::move(clock); }

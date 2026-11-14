@@ -401,7 +401,8 @@ MCP Inspector: `npx @modelcontextprotocol/inspector`, then choose transport *Str
 
 - `POST /mcp` takes one JSON-RPC message and returns `application/json`. Notifications get `202 Accepted`.
 - `initialize` (sent without a session id) returns an `Mcp-Session-Id` header that every later request must carry.
-- Unknown or expired sessions get `404`; the client should re-initialize. Sessions expire after 10 minutes idle and count toward the 4-client limit, and `DELETE /mcp` ends one.
+- Unknown or expired sessions get `404`; the client should re-initialize. Sessions expire after 10 minutes idle, and `DELETE /mcp` ends one.
+- Up to 4 sessions at a time, separate from the 4 WebSocket clients. When all 4 are taken, a new `initialize` replaces the least recently used session that has been idle for at least 1 s (many clients, such as the MCP Inspector CLI, never send `DELETE`); its client gets `404` on its next request and starts over.
 - With authentication on, every request needs `Authorization: Bearer <token>` (`401` otherwise). A browser `Origin` must match the device's host (`403` otherwise), which protects against DNS rebinding.
 - `GET /mcp` returns `405`: the server doesn't open SSE streams, so HTTP clients get no push notifications and `resources.subscribe` is `false` for them.
 - Requests are limited to 16 KB.
