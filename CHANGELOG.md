@@ -6,18 +6,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
-- **The MCP WebSocket requires an access token** — #12
+- **Optional MCP access tokens** — #12
+  - **Off by default**: existing clients and examples keep working unchanged. Turn it on
+    with the serial command `auth on` (or `auth off` to undo), or ship it on with the
+    build flag `MCP_AUTH_DEFAULT=1`. Stored in NVS `security`/`auth`.
   - Full-control token, plus an optional read-only token, stored in NVS namespace
     `security`. Sent as `Authorization: Bearer <token>` or `?token=<token>`.
-  - Generated on first boot and printed once on the serial console. Managed with the new
+  - Generated and printed on the serial console when auth is turned on. Managed with the
     serial commands `token show|rotate|set`, `token ro rotate|clear`, `ota show|rotate`.
-  - Unauthenticated connections are closed with code 4401. A read-only token calling a
-    state-changing method gets `-32020`.
-  - `MCP_ALLOW_UNAUTHENTICATED=1` keeps the old open behaviour for lab builds without a
-    token.
+  - With auth on, unauthenticated connections are closed with code 4401, and a read-only
+    token calling a state-changing method gets `-32020`.
   - Limits: at most 4 clients (close code 4429); per-client rate limit of burst 20, then
     10/s (`-32021`); a heartbeat drops dead clients.
-  - The dashboard and `examples/client/client.ts` take a token.
+  - The dashboard and `examples/client/client.ts` take an optional token.
 - **OTA has no default password** — #12. A random per-device password is generated on
   first boot (also replacing a stored `admin`). Repeated failed logins from one IP lock
   that IP out with `429`.

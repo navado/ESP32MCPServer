@@ -87,9 +87,8 @@ bool constantTimeEquals(const std::string& a, const std::string& b) {
 
 Access authenticate(const Credentials& creds, const std::string& header,
                     const std::string& url) {
-    if (creds.fullToken.empty()) {
-        return creds.allowUnauthenticated ? Access::Full : Access::None;
-    }
+    if (!creds.required) return Access::Full;
+    if (creds.fullToken.empty()) return Access::None;
     std::string token = extractBearer(header);
     if (token.empty()) token = extractQueryToken(url);
     if (token.empty()) return Access::None;
