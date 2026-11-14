@@ -153,6 +153,12 @@ void test_gatt_value_len_clamped(void) {
     TEST_ASSERT_EQUAL(20, maxWriteNoResponse(DEFAULT_ATT_MTU));
     TEST_ASSERT_EQUAL(514, maxWriteNoResponse(LOCAL_ATT_MTU));
     TEST_ASSERT_EQUAL(0, maxWriteNoResponse(0));
+    // total budget across a link
+    TEST_ASSERT_EQUAL(200, gattBytesToKeep(200, 512, 0, 8192));
+    TEST_ASSERT_EQUAL(100, gattBytesToKeep(200, 512, 8092, 8192));   // only 100 left
+    TEST_ASSERT_EQUAL(0,   gattBytesToKeep(200, 512, 8192, 8192));   // budget used up
+    TEST_ASSERT_EQUAL(0,   gattBytesToKeep(200, 512, 9000, 8192));
+    TEST_ASSERT_EQUAL(128, gattBytesToKeep(200, 128, 0, 8192));
 }
 
 void test_notify_capture_clamp_passes_small_values(void) {

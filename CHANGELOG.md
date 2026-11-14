@@ -32,7 +32,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **GATT values beyond 64 bytes, MTU negotiation** — #26
   - Each link asks for an ATT MTU of 517; `ble/connect/results` reports `mtu`.
   - Reads keep up to 512 bytes per value with PSRAM, 128 without (the memory plan's new
-    `bleValueBytes`). Cut values carry `truncated: true`, and reads and notifications
+    `bleValueBytes`), and at most 32 KB / 8 KB over all values of a link (`bleValueBudget`). Cut values carry `truncated: true`, and reads and notifications
     report `length`.
   - Writes without a response are checked against MTU − 3 (`-32602`).
   - Values and notifications are matched by handle, so characteristics sharing a UUID no

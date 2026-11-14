@@ -81,7 +81,8 @@ public:
     // clamped to [1, blecore::MAX_DEVICES_LIMIT]; valueBytes (stored bytes
     // per GATT value) to [20, gattcore::MAX_GATT_VALUE_BYTES].
     void setCaptureLimits(size_t maxDevices, size_t maxBytes,
-                          size_t valueBytes = gattcore::DEFAULT_GATT_VALUE_CAP);
+                          size_t valueBytes = gattcore::DEFAULT_GATT_VALUE_CAP,
+                          size_t valueBudget = gattcore::DEFAULT_GATT_VALUE_BUDGET);
     size_t getValueCap() const;
     size_t getMaxDevices() const;
 
@@ -270,6 +271,9 @@ private:
     std::map<uint16_t, std::string> notifyValues_;   // handle -> latest hex
     std::map<uint16_t, size_t>      notifyLengths_;  // handle -> bytes received
     size_t   valueCap_ = gattcore::DEFAULT_GATT_VALUE_CAP;
+    size_t   valueBudget_ = gattcore::DEFAULT_GATT_VALUE_BUDGET;
+    // Bytes currently stored in services_ and notifyValues_, except `skipHandle`'s.  Mutex held.
+    size_t storedValueBytes(uint16_t skipHandle) const;
     uint16_t mtu_ = gattcore::DEFAULT_ATT_MTU;
     // On-demand subscriptions (issue #14): handle -> uuid, and their values.
     std::map<uint16_t, std::string> liveSubs_;

@@ -34,6 +34,7 @@ struct MemoryPlan {
     size_t     bleMaxDevices = 0;      // 0 when BLE is not compiled in
     size_t     bleCaptureBytes = 0;
     size_t     bleValueBytes = 0;      // stored bytes per GATT value (cut beyond)
+    size_t     bleValueBudget = 0;     // stored bytes over all GATT values of a link
 };
 
 // PSRAM below this is not worth planning around (e.g. mostly in use already).
@@ -51,6 +52,8 @@ constexpr size_t BLE_BYTES_SHARED    = 16u * 1024u;
 // GATT value cap: 32 queued notifications + the enumerated values must fit.
 constexpr size_t BLE_VALUE_BYTES_PSRAM  = 512;
 constexpr size_t BLE_VALUE_BYTES_SHARED = 128;
+constexpr size_t BLE_VALUE_BUDGET_PSRAM  = 32u * 1024u;
+constexpr size_t BLE_VALUE_BUDGET_SHARED = 8u * 1024u;
 
 inline const char* modeName(MemoryMode m) {
     switch (m) {
@@ -73,6 +76,7 @@ inline MemoryPlan planMemory(bool psramFound, uint32_t psramFree, bool bleEnable
             p.bleMaxDevices = BLE_DEVICES_PSRAM;
             p.bleCaptureBytes = BLE_BYTES_PSRAM;
             p.bleValueBytes = BLE_VALUE_BYTES_PSRAM;
+            p.bleValueBudget = BLE_VALUE_BUDGET_PSRAM;
         }
         return p;
     }
@@ -84,6 +88,7 @@ inline MemoryPlan planMemory(bool psramFound, uint32_t psramFree, bool bleEnable
         p.bleMaxDevices = BLE_DEVICES_SHARED;
         p.bleCaptureBytes = BLE_BYTES_SHARED;
         p.bleValueBytes = BLE_VALUE_BYTES_SHARED;
+        p.bleValueBudget = BLE_VALUE_BUDGET_SHARED;
         return p;
     }
     p.mode = MemoryMode::Internal;

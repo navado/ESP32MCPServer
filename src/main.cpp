@@ -372,6 +372,7 @@ static void fillFeatures(JsonObject root) {
     mp["bleMaxDevices"]     = memoryPlan.bleMaxDevices;
     mp["bleCaptureBytes"]   = memoryPlan.bleCaptureBytes;
     mp["bleValueBytes"]     = memoryPlan.bleValueBytes;
+    mp["bleValueBudget"]    = memoryPlan.bleValueBudget;
     root["board"] = BOARD_NAME;
 }
 
@@ -462,7 +463,8 @@ void setup() {
         memoryPlan = plan;
         mcp::BusHistory::setMemoryPolicy(plan.busHistoryInPsram, plan.busHistoryCap);
 #if BOARD_HAS_BLE
-        bleScanner.setCaptureLimits(plan.bleMaxDevices, plan.bleCaptureBytes, plan.bleValueBytes);
+        bleScanner.setCaptureLimits(plan.bleMaxDevices, plan.bleCaptureBytes, plan.bleValueBytes,
+                                    plan.bleValueBudget);
 #endif
         Serial.printf("[mem] plan=%s psram=%u busHistoryCap=%u bleDevices=%u bleBytes=%u\n",
                       mcp::mem::modeName(plan.mode), (unsigned)ESP.getFreePsram(),

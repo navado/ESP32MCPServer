@@ -99,6 +99,18 @@ inline size_t clampGattValueLen(size_t len, size_t cap = DEFAULT_GATT_VALUE_CAP)
     return len > cap ? cap : len;
 }
 
+// Bytes to store of a `len`-byte value: at most the per-value `cap` and
+// whatever is left of the total `budget` (bytes already stored: `used`).
+// Bounds what one peripheral can make us keep (512 attributes x 512 bytes
+// would otherwise be ~768 KB as hex + text).
+constexpr size_t DEFAULT_GATT_VALUE_BUDGET = 8u * 1024u;
+inline size_t gattBytesToKeep(size_t len, size_t cap, size_t used, size_t budget) {
+    size_t keep = clampGattValueLen(len, cap);
+    const size_t left = used >= budget ? 0 : budget - used;
+    return keep > left ? left : keep;
+}
+
+
 // Upper bound for the client-supplied notifyCaptureMs.  ble/services/results
 // blocks the MCP task while it waits, so an unbounded value would stall the
 // WebSocket loop (and every other client) for as long as the caller asked.

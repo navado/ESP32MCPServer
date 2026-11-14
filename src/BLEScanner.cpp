@@ -198,7 +198,8 @@ void BLEScanner::evictAt(size_t idx) {
     ++devicesEvicted_;
 }
 
-void BLEScanner::setCaptureLimits(size_t maxDevices, size_t maxBytes, size_t valueBytes) {
+void BLEScanner::setCaptureLimits(size_t maxDevices, size_t maxBytes, size_t valueBytes,
+                                  size_t valueBudget) {
     if (maxDevices < 1) maxDevices = 1;
     if (maxDevices > blecore::MAX_DEVICES_LIMIT) maxDevices = blecore::MAX_DEVICES_LIMIT;
     if (valueBytes < 20) valueBytes = 20;
@@ -207,7 +208,18 @@ void BLEScanner::setCaptureLimits(size_t maxDevices, size_t maxBytes, size_t val
     maxDevices_ = maxDevices;
     maxCaptureBytes_ = maxBytes;
     valueCap_ = valueBytes;
+    valueBudget_ = valueBudget;
     unlock();
+}
+
+size_t BLEScanner::storedValueBytes(uint16_t skipHandle) const {
+    size_t n = 0;
+    for (const auto& svc : services_)
+        for (const auto& chr : svc.characteristics)
+            if (chr.handle != skipHandle) n += chr.valueHex.size() / 2;
+    for (const auto& kv : notifyValues_)
+        if (kv.first != skipHandle) n += kv.second.size() / 2;
+    return n;
 }
 
 size_t BLEScanner::getValueCap() const {
@@ -797,17 +809,25 @@ void BLEScanner::onGattcEvent(esp_gattc_cb_event_t event, esp_gatt_if_t gattcIf,
             if (param->read.status == ESP_GATT_OK && param->read.value_len > 0) {
                 // Bluedroid already did a long read (read blob) for values
                 // longer than MTU-1; keep up to the memory plan's cap.
-                const size_t keep = gattcore::clampGattValueLen(param->read.value_len, valueCap_);
-                std::string hex = hexEncode(param->read.value, keep);
-                for (auto& svc : services_) {
-                    for (auto& chr : svc.characteristics) {
-                        if (chr.handle == param->read.handle) {
-                            chr.valueHex = hex;
-                            chr.valueText = hexToAscii(hex);
-                            chr.valueLength = param->read.value_len;
-                            chr.truncated = keep < param->read.value_len;
+                // Bounded per value AND over the whole link (memory plan).
+                const size_t keep = gattcore::gattBytesToKeep(
+                    param->read.value_len, valueCap_,
+                    storedValueBytes(param->read.handle), valueBudget_);
+                try {
+                    std::string hex = hexEncode(param->read.value, keep);
+                    for (auto& svc : services_) {
+                        for (auto& chr : svc.characteristics) {
+                            if (chr.handle == param->read.handle) {
+                                chr.valueHex = hex;
+                                chr.valueText = hexToAscii(hex);
+                                chr.valueLength = param->read.value_len;
+                                chr.truncated = keep < param->read.value_len;
+                            }
                         }
                     }
+                } catch (const std::bad_alloc&) {
+                    // Out of memory in the BLE callback: drop the value
+                    // rather than abort (an uncaught throw here reboots).
                 }
             }
             (void)uuid;
@@ -836,20 +856,29 @@ void BLEScanner::onGattcEvent(esp_gattc_cb_event_t event, esp_gatt_if_t gattcIf,
                 unlock();
                 break;
             }
-            const size_t keep = gattcore::clampGattValueLen(param->notify.value_len, valueCap_);
-            std::string hex = hexEncode(param->notify.value, keep);
-            notifyValues_[param->notify.handle] = hex;
-            notifyLengths_[param->notify.handle] = param->notify.value_len;
-            auto live = liveSubs_.find(param->notify.handle);
-            if (live != liveSubs_.end()) {
-                gattops::NotifyEvent ev;
-                ev.handle      = param->notify.handle;
-                ev.uuid        = live->second;
-                ev.valueHex    = hex;
-                ev.timestampMs = millis();
-                ev.length      = param->notify.value_len;
-                ev.truncated   = keep < param->notify.value_len;
-                notifyQueue_.push(std::move(ev));
+            try {
+                // The latest value per handle counts against the link budget;
+                // queued events are bounded by count (MAX_QUEUED_NOTIFICATIONS)
+                // times the per-value cap.
+                const size_t keepLatest = gattcore::gattBytesToKeep(
+                    param->notify.value_len, valueCap_,
+                    storedValueBytes(param->notify.handle), valueBudget_);
+                notifyValues_[param->notify.handle] = hexEncode(param->notify.value, keepLatest);
+                notifyLengths_[param->notify.handle] = param->notify.value_len;
+                auto live = liveSubs_.find(param->notify.handle);
+                if (live != liveSubs_.end()) {
+                    const size_t keep = gattcore::clampGattValueLen(param->notify.value_len, valueCap_);
+                    gattops::NotifyEvent ev;
+                    ev.handle      = param->notify.handle;
+                    ev.uuid        = live->second;
+                    ev.valueHex    = hexEncode(param->notify.value, keep);
+                    ev.timestampMs = millis();
+                    ev.length      = param->notify.value_len;
+                    ev.truncated   = keep < param->notify.value_len;
+                    notifyQueue_.push(std::move(ev));
+                }
+            } catch (const std::bad_alloc&) {
+                // Drop the value rather than abort in the BLE callback.
             }
             unlock();
             break;
