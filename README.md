@@ -15,7 +15,7 @@ Connect an AI agent directly to your hardware: query I2C sensors, parse NMEA 018
 | Capability | Details |
 |---|---|
 | **MCP Protocol** | JSON-RPC 2.0 over WebSocket, resource discovery & subscriptions |
-| **I2C Sensors** | Auto-scan + drivers for BME280, MPU6050, ADS1115, SHT31, BH1750, INA219 |
+| **I2C Sensors** | Auto-scan + drivers for BME280, MPU6050, ADS1115, SHT31, AHT20, BH1750, INA219 |
 | **NMEA 0183** | GGA, RMC, VTG, GSV, MWV, DBT, DPT, HDG, HDT with XOR checksum validation |
 | **NMEA 2000 / CAN** | 29-bit PGNs: position, heading, speed, depth, wind, attitude, water temp |
 | **OBD-II / CAN** | Standard 11-bit OBD-II service 01/09 PID decoding (60+ PIDs) |
@@ -820,6 +820,7 @@ python3 examples/client/mcp_ble.py watch aa:bb:cc:dd:ee:ff 34 --seconds 10 --add
 | **MPU6050** | 0x68, 0x69 | `accel_x/y/z`, `gyro_x/y/z`, `temperature` | g, °/s, °C |
 | **ADS1115** | 0x48–0x4B | `ch0_V`, `ch1_V`, `ch2_V`, `ch3_V` | V (±4.096 range) |
 | **SHT31** | 0x44, 0x45 | `temperature`, `humidity` | °C, %RH |
+| **AHT20** | 0x38 | `temperature`, `humidity` | °C, %RH |
 | **BH1750** | 0x23, 0x5C | `light_lux` | lux |
 | **INA219** | 0x40–0x4F | `bus_voltage_V`, `shunt_mV`, `current_mA`, `power_mW` | V, mV, mA, mW |
 
