@@ -133,6 +133,19 @@ public:
     // Remove a previously registered method handler.
     void unregisterMethodHandler(const std::string& method);
 
+    // Declare a method namespace (e.g. "ble/") that exists in the protocol
+    // but is not available on this build.  Unregistered methods under the
+    // prefix return -32011 "Feature unavailable" naming `feature` and
+    // `reason`, so clients can tell "not on this board" from a typo (-32601).
+    void registerUnavailableNamespace(const std::string& prefix,
+                                      const std::string& feature,
+                                      const std::string& reason);
+
+    // Called from removeClient() after per-client state is dropped, so other
+    // components can release resources the client owned (issue #15).
+    using ClientRemovedHook = std::function<void(uint8_t clientId)>;
+    void setClientRemovedHook(ClientRemovedHook hook) { clientRemovedHook_ = std::move(hook); }
+
     // Expose a registered method as an MCP tool (tools/list, tools/call).
     void registerTool(const ToolDef& tool);
     size_t toolCount() const { return tools_.size(); }
@@ -177,6 +190,12 @@ private:
 
     // Extension method registry: method name -> handler
     std::unordered_map<std::string, MethodHandler> methodHandlers_;
+
+    struct UnavailableNamespace {
+        std::string prefix, feature, reason;
+    };
+    std::vector<UnavailableNamespace> unavailable_;
+    ClientRemovedHook clientRemovedHook_;
 
     // Tool registry, in registration order (tools/list order).
     std::vector<ToolDef> tools_;

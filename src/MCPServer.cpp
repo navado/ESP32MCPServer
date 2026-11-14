@@ -1,5 +1,6 @@
 #include "MCPServer.h"
 #include "MCPTypes.h"
+#include "FeatureModel.h"
 #include <ArduinoJson.h>
 #include <new>
 #ifndef NATIVE_TEST
@@ -119,6 +120,12 @@ void MCPServer::registerMethodHandler(const std::string& method,
 
 void MCPServer::unregisterMethodHandler(const std::string& method) {
     methodHandlers_.erase(method);
+}
+
+void MCPServer::registerUnavailableNamespace(const std::string& prefix,
+                                             const std::string& feature,
+                                             const std::string& reason) {
+    unavailable_.push_back({prefix, feature, reason});
 }
 
 // ---------------------------------------------------------------------------
@@ -289,6 +296,12 @@ std::string MCPServer::dispatch(uint8_t clientId, const std::string& method,
     auto it = methodHandlers_.find(method);
     if (it != methodHandlers_.end()) {
         return invokeHandler(it->second, clientId, id, params);
+    }
+
+    for (const auto& ns : unavailable_) {
+        if (method.compare(0, ns.prefix.size(), ns.prefix) == 0) {
+            return features::unavailableError(id, ns.feature, ns.reason);
+        }
     }
 
     return makeError(id, -32601, "Method not found");
@@ -569,6 +582,7 @@ void MCPServer::removeClient(uint8_t clientId) {
             ++it;
         }
     }
+    if (clientRemovedHook_) clientRemovedHook_(clientId);
 }
 
 // ---------------------------------------------------------------------------

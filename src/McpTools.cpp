@@ -129,6 +129,10 @@ void registerMcpTools(MCPServer& s) {
         "Current value of one metric, or of all metrics.", true, false, false, false));
     s.registerTool(tool("metrics_history", "Metric history", "metrics/history", kMetricsHistory,
         "Recorded values of a metric over a time window.", true, false, false, false));
+    s.registerTool(tool("system_features", "Device features", "system/features", kEmpty,
+        "Which features this board has (BLE, OTA, buses), whether each is idle, active or "
+        "blocked and by what, who owns it, and the active memory plan. Check this when a "
+        "call fails with 'Feature busy' or 'Feature unavailable'.", true, false, false, false));
     s.registerTool(tool("logs_clear", "Clear metric history", "logs/clear", kEmpty,
         "Delete all recorded metric history.", false, true, true, false));
 

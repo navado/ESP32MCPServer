@@ -24,6 +24,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   that IP out with `429`.
 
 ### Added
+- **Feature/state model and structured errors** — #15
+  - `system/features` (and the subscribable resource `device://features`) reports every
+    feature's availability, state, owner and conflicts, plus the active memory plan.
+  - Stable error codes: `-32010` Feature busy, `-32011` Feature unavailable,
+    `-32012` Resource limit (reserved), `-32013` Feature not ready; `data` names the blocker
+    and the method that resolves it.
+  - Features started by a client are released when it disconnects (scan stopped, GATT
+    link dropped).
+  - OTA takes priority over BLE: an upload stops the scan and drops the GATT link, and BLE
+    (including `ble/write` and `ble/subscribe`) is blocked until it ends.
+  - MCP tool `system_features`.
 - **BLE client exposure** — #14
   - GATT **write** (`ble/write`, with or without response, by handle or UUID) and
     on-demand **subscribe** (`ble/subscribe` / `ble/unsubscribe`). Values are pushed to
@@ -66,6 +77,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `partitions_4mb_ota.csv` with 1.81 MB OTA slots for 4 MB ESP32 boards — #9.
 
 ### Changed
+- **`ble/*` failure results are now JSON-RPC errors** — #15. `ble/scan` while a scan is
+  running returns `-32010` (with `retryAfterMs`) instead of `{started:false, remainingMs}`;
+  `ble/connect` while busy returns `-32010` instead of `{started:false}`, and a malformed MAC
+  returns `-32602`; `ble/services/start` while not connected returns `-32013`. On boards
+  without BLE, `ble/*` returns `-32011` instead of `-32601`. Clients that checked
+  `started:false` must handle the error instead.
+- Disconnecting a WebSocket client now stops the BLE scan and drops the GATT link it
+  started — #15.
 - `initialize` returns capability *objects* (`resources: {subscribe, listChanged}`,
   `tools: {listChanged}`) instead of `{subscriptions: bool, resources: bool}`, and the
   negotiated protocol version instead of a fixed `2024-11-05` — #13.
