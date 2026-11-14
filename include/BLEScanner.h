@@ -78,8 +78,11 @@ public:
     uint32_t getDevicesEvicted() const;
 
     // Capture limits, set once at boot from the MemoryPlan.  maxDevices is
-    // clamped to [1, blecore::MAX_DEVICES_LIMIT].
-    void setCaptureLimits(size_t maxDevices, size_t maxBytes);
+    // clamped to [1, blecore::MAX_DEVICES_LIMIT]; valueBytes (stored bytes
+    // per GATT value) to [20, gattcore::MAX_GATT_VALUE_BYTES].
+    void setCaptureLimits(size_t maxDevices, size_t maxBytes,
+                          size_t valueBytes = gattcore::DEFAULT_GATT_VALUE_CAP);
+    size_t getValueCap() const;
     size_t getMaxDevices() const;
 
     // Stop a running scan.  Safe to call from a normal task context.
@@ -137,6 +140,9 @@ public:
     void disconnect();
 
     bool isConnected() const;
+
+    // Negotiated ATT MTU of the current link (23 until the exchange ends).
+    uint16_t getMtu() const;
 
     // Phase 1: enumerate services + characteristics of the connected device,
     // read readable values, and subscribe to all notifiable/indicatable
@@ -262,6 +268,9 @@ private:
     // Notify-capture state (guarded by mutex_).
     std::map<uint16_t, std::string> notifyHandles_;  // handle -> uuid
     std::map<uint16_t, std::string> notifyValues_;   // handle -> latest hex
+    std::map<uint16_t, size_t>      notifyLengths_;  // handle -> bytes received
+    size_t   valueCap_ = gattcore::DEFAULT_GATT_VALUE_CAP;
+    uint16_t mtu_ = gattcore::DEFAULT_ATT_MTU;
     // On-demand subscriptions (issue #14): handle -> uuid, and their values.
     std::map<uint16_t, std::string> liveSubs_;
     gattops::NotifyQueue notifyQueue_;

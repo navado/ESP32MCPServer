@@ -13,6 +13,7 @@ void test_psram_board_puts_bus_history_in_psram(void) {
     TEST_ASSERT_EQUAL_UINT32(PSRAM_BUS_HISTORY_MAX, p.busHistoryCap);  // min(1 MB, 2 MB)
     TEST_ASSERT_EQUAL(BLE_DEVICES_PSRAM, p.bleMaxDevices);
     TEST_ASSERT_EQUAL(BLE_BYTES_PSRAM, p.bleCaptureBytes);
+    TEST_ASSERT_EQUAL(BLE_VALUE_BYTES_PSRAM, p.bleValueBytes);
 }
 
 void test_psram_budget_is_quarter_of_free_when_small(void) {
@@ -39,6 +40,7 @@ void test_no_psram_with_ble_shares_internal_heap(void) {
     TEST_ASSERT_EQUAL_UINT32(SHARED_BUS_HISTORY_CAP, p.busHistoryCap);  // 160 KB lowered to 96 KB
     TEST_ASSERT_EQUAL(BLE_DEVICES_SHARED, p.bleMaxDevices);
     TEST_ASSERT_EQUAL(BLE_BYTES_SHARED, p.bleCaptureBytes);
+    TEST_ASSERT_EQUAL(BLE_VALUE_BYTES_SHARED, p.bleValueBytes);
 }
 
 void test_shared_plan_keeps_a_lower_board_cap(void) {

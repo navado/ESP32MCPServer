@@ -9,6 +9,7 @@
 #include <esp_gap_bt_api.h>
 #include <esp_gatt_defs.h>
 #include <esp_gattc_api.h>
+#include <esp_gatt_common_api.h>
 #include <new>
 
 namespace mcp {
@@ -107,6 +108,8 @@ void BLEScanner::begin() {
     BLEDevice::init("");
     g_instance = this;
     BLEDevice::setCustomGattcHandler(gattcTrampoline);
+    // Offer the largest ATT MTU; each link negotiates it after opening (#26).
+    esp_ble_gatt_set_local_mtu(gattcore::LOCAL_ATT_MTU);
 }
 
 bool BLEScanner::startScan(uint32_t durationMs, const blecore::CaptureFilter& filter) {
@@ -195,13 +198,30 @@ void BLEScanner::evictAt(size_t idx) {
     ++devicesEvicted_;
 }
 
-void BLEScanner::setCaptureLimits(size_t maxDevices, size_t maxBytes) {
+void BLEScanner::setCaptureLimits(size_t maxDevices, size_t maxBytes, size_t valueBytes) {
     if (maxDevices < 1) maxDevices = 1;
     if (maxDevices > blecore::MAX_DEVICES_LIMIT) maxDevices = blecore::MAX_DEVICES_LIMIT;
+    if (valueBytes < 20) valueBytes = 20;
+    if (valueBytes > gattcore::MAX_GATT_VALUE_BYTES) valueBytes = gattcore::MAX_GATT_VALUE_BYTES;
     lock();
     maxDevices_ = maxDevices;
     maxCaptureBytes_ = maxBytes;
+    valueCap_ = valueBytes;
     unlock();
+}
+
+size_t BLEScanner::getValueCap() const {
+    lock();
+    size_t c = valueCap_;
+    unlock();
+    return c;
+}
+
+uint16_t BLEScanner::getMtu() const {
+    lock();
+    uint16_t m = mtu_;
+    unlock();
+    return m;
 }
 
 size_t BLEScanner::getMaxDevices() const {
@@ -385,6 +405,7 @@ bool BLEScanner::connect(const std::string& mac, uint32_t timeoutMs, int addrTyp
     }
     hasPeer_ = true;
     connectTimeoutMs_ = timeoutMs;
+    mtu_ = gattcore::DEFAULT_ATT_MTU;
     openIssued_ = false;
     // The GATT app registration survives across connections, and registering
     // the same app id again fails with ESP_GATT_ERROR (REG_EVT not OK), which
@@ -452,6 +473,7 @@ std::vector<BLEServiceInfo> BLEScanner::getServicesStart() {
     pendingReads_.clear();
     notifyHandles_.clear();
     notifyValues_.clear();
+    notifyLengths_.clear();
     // A fresh enumeration subscribes to everything notifiable; on-demand
     // subscriptions (and their handles) are re-established by the client.
     liveSubs_.clear();
@@ -505,13 +527,18 @@ std::vector<BLEServiceInfo> BLEScanner::getServicesResults(uint32_t notifyCaptur
     std::vector<BLEServiceInfo> out = services_;
     // Fold any captured notified values into the response.
     for (auto& [handle, uuid] : notifyHandles_) {
+        (void)uuid;
         auto it = notifyValues_.find(handle);
         if (it == notifyValues_.end()) continue;
+        auto len = notifyLengths_.find(handle);
         for (auto& svc : out) {
             for (auto& chr : svc.characteristics) {
-                if (chr.uuid == uuid) {
+                if (chr.handle == handle) {
                     chr.valueHex = it->second;
                     chr.valueText = hexToAscii(chr.valueHex);
+                    chr.valueLength = len != notifyLengths_.end() ? len->second
+                                                                  : it->second.size() / 2;
+                    chr.truncated = chr.valueLength > it->second.size() / 2;
                 }
             }
         }
@@ -711,6 +738,16 @@ void BLEScanner::onGattcEvent(esp_gattc_cb_event_t event, esp_gatt_if_t gattcIf,
                     connected_ = true;
                     gattState_ = GattState::Connected;
                     stateStartMillis_ = millis();
+                    // The open event carries the MTU already in effect (the
+                    // peer may have run the exchange itself).
+                    mtu_ = param->open.mtu > gattcore::DEFAULT_ATT_MTU ? param->open.mtu
+                                                                       : gattcore::DEFAULT_ATT_MTU;
+                    const uint16_t cid = connId_;
+                    unlock();
+                    // Ask for a larger MTU (answered by CFG_MTU_EVT).  Outside
+                    // the mutex; Bluedroid queues it ahead of later requests.
+                    esp_ble_gattc_send_mtu_req(gattcIf, cid);
+                    break;
                 }
                 unlock();
             } else if (gattState_ == GattState::Idle) {
@@ -722,6 +759,19 @@ void BLEScanner::onGattcEvent(esp_gattc_cb_event_t event, esp_gatt_if_t gattcIf,
             } else {
                 unlock();
             }
+            break;
+        }
+        case ESP_GATTC_CFG_MTU_EVT: {
+            lock();
+            // Our request fails if the peer already ran the exchange; the
+            // event still reports the MTU in effect.  It can also arrive
+            // before OPEN_EVT, so only the interface and a sane size are checked.
+            if (gattcIf == gattcIf_ && param->cfg_mtu.mtu >= gattcore::DEFAULT_ATT_MTU &&
+                (connected_ || gattState_ == GattState::Connecting) &&
+                (param->cfg_mtu.status == ESP_GATT_OK || param->cfg_mtu.mtu > mtu_)) {
+                mtu_ = param->cfg_mtu.mtu;
+            }
+            unlock();
             break;
         }
         case ESP_GATTC_SEARCH_CMPL_EVT: {
@@ -745,19 +795,22 @@ void BLEScanner::onGattcEvent(esp_gattc_cb_event_t event, esp_gatt_if_t gattcIf,
             std::string uuid = it->second;
             pendingReads_.erase(it);
             if (param->read.status == ESP_GATT_OK && param->read.value_len > 0) {
-                std::string val(reinterpret_cast<const char*>(param->read.value),
-                                gattcore::clampGattValueLen(param->read.value_len));
-                std::string hex = hexEncode(reinterpret_cast<const uint8_t*>(val.data()),
-                                            val.length());
+                // Bluedroid already did a long read (read blob) for values
+                // longer than MTU-1; keep up to the memory plan's cap.
+                const size_t keep = gattcore::clampGattValueLen(param->read.value_len, valueCap_);
+                std::string hex = hexEncode(param->read.value, keep);
                 for (auto& svc : services_) {
                     for (auto& chr : svc.characteristics) {
-                        if (chr.uuid == uuid) {
+                        if (chr.handle == param->read.handle) {
                             chr.valueHex = hex;
                             chr.valueText = hexToAscii(hex);
+                            chr.valueLength = param->read.value_len;
+                            chr.truncated = keep < param->read.value_len;
                         }
                     }
                 }
             }
+            (void)uuid;
             if (pendingReads_.empty() && gattState_ == GattState::Reading) {
                 if (notifyHandles_.empty()) {
                     gattEnumDone();
@@ -783,11 +836,10 @@ void BLEScanner::onGattcEvent(esp_gattc_cb_event_t event, esp_gatt_if_t gattcIf,
                 unlock();
                 break;
             }
-            std::string val(reinterpret_cast<const char*>(param->notify.value),
-                            gattcore::clampGattValueLen(param->notify.value_len));
-            std::string hex = hexEncode(reinterpret_cast<const uint8_t*>(val.data()),
-                                        val.length());
+            const size_t keep = gattcore::clampGattValueLen(param->notify.value_len, valueCap_);
+            std::string hex = hexEncode(param->notify.value, keep);
             notifyValues_[param->notify.handle] = hex;
+            notifyLengths_[param->notify.handle] = param->notify.value_len;
             auto live = liveSubs_.find(param->notify.handle);
             if (live != liveSubs_.end()) {
                 gattops::NotifyEvent ev;
@@ -795,6 +847,8 @@ void BLEScanner::onGattcEvent(esp_gattc_cb_event_t event, esp_gatt_if_t gattcIf,
                 ev.uuid        = live->second;
                 ev.valueHex    = hex;
                 ev.timestampMs = millis();
+                ev.length      = param->notify.value_len;
+                ev.truncated   = keep < param->notify.value_len;
                 notifyQueue_.push(std::move(ev));
             }
             unlock();

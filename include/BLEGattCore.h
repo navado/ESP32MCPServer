@@ -75,14 +75,28 @@ constexpr uint32_t CLOSE_TIMEOUT_MS          = 2000;   // close handshake
 // or broken peripheral must not be able to exhaust the heap from the BLE task
 // (where an uncaught bad_alloc aborts the firmware).
 constexpr uint16_t MAX_GATT_DB_ATTRS   = 512;  // attributes copied from the GATT cache
-constexpr size_t   MAX_GATT_VALUE_BYTES = 64;  // stored bytes per read/notified value
+// Stored bytes per read/notified value: at most the ATT maximum (512); the
+// firmware sets a lower cap from the memory plan (BLEScanner::setCaptureLimits).
+constexpr size_t   MAX_GATT_VALUE_BYTES = 512;
+constexpr size_t   DEFAULT_GATT_VALUE_CAP = 128;
+
+// ATT MTU: 23 until the exchange completes; we offer the BLE maximum.
+constexpr uint16_t DEFAULT_ATT_MTU = 23;
+constexpr uint16_t LOCAL_ATT_MTU   = 517;
+
+// Longest value one write-without-response can carry on this MTU (no long
+// writes without a response; writes with response use prepare/execute).
+inline size_t maxWriteNoResponse(uint16_t mtu) {
+    return mtu > 3 ? static_cast<size_t>(mtu - 3) : 0;
+}
 
 inline uint16_t clampGattDbCount(uint16_t count) {
     return count > MAX_GATT_DB_ATTRS ? MAX_GATT_DB_ATTRS : count;
 }
 
-inline size_t clampGattValueLen(size_t len) {
-    return len > MAX_GATT_VALUE_BYTES ? MAX_GATT_VALUE_BYTES : len;
+inline size_t clampGattValueLen(size_t len, size_t cap = DEFAULT_GATT_VALUE_CAP) {
+    if (cap > MAX_GATT_VALUE_BYTES) cap = MAX_GATT_VALUE_BYTES;
+    return len > cap ? cap : len;
 }
 
 // Upper bound for the client-supplied notifyCaptureMs.  ble/services/results

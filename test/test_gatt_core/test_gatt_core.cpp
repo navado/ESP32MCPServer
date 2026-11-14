@@ -144,7 +144,15 @@ void test_gatt_db_count_clamped(void) {
 void test_gatt_value_len_clamped(void) {
     TEST_ASSERT_EQUAL(0, clampGattValueLen(0));
     TEST_ASSERT_EQUAL(20, clampGattValueLen(20));
-    TEST_ASSERT_EQUAL(MAX_GATT_VALUE_BYTES, clampGattValueLen(512));
+    TEST_ASSERT_EQUAL(DEFAULT_GATT_VALUE_CAP, clampGattValueLen(512));
+    TEST_ASSERT_EQUAL(200, clampGattValueLen(200, 512));
+    TEST_ASSERT_EQUAL(128, clampGattValueLen(200, 128));
+    // the cap itself is bounded by the ATT maximum
+    TEST_ASSERT_EQUAL(MAX_GATT_VALUE_BYTES, clampGattValueLen(4000, 100000));
+    // write without response fits one packet
+    TEST_ASSERT_EQUAL(20, maxWriteNoResponse(DEFAULT_ATT_MTU));
+    TEST_ASSERT_EQUAL(514, maxWriteNoResponse(LOCAL_ATT_MTU));
+    TEST_ASSERT_EQUAL(0, maxWriteNoResponse(0));
 }
 
 void test_notify_capture_clamp_passes_small_values(void) {
