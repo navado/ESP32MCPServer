@@ -71,9 +71,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   negotiated protocol version instead of a fixed `2024-11-05` — #13.
 - JSON-RPC messages without an `id` are treated as notifications and get no response.
   Before, they were answered with `id: 0` — #13.
-- **Upgrading: existing MCP clients must send the token** printed on the serial console
-  after flashing this version. The OTA password changes too if it was still `admin`. The
-  `isDefaultPwd` field is gone from `/ota/config` — #12.
+- **Upgrading:** MCP clients are unaffected (authentication is off until `auth on`). The
+  OTA password changes if it was still `admin`, and the `isDefaultPwd` field is gone from
+  `/ota/config` — #12.
+- **`esp32-c3-devkitm-1` moves to `partitions_4mb_ota.csv`** (the firmware outgrew the
+  1.25 MB app slots). Flash once over USB, then `-t uploadfs`; NVS is kept — #12.
 - **4 MB boards (`esp32-devkitc`, `adafruit-huzzah32`, `m5stack-core`) use a new partition
   table.** It cannot be applied over OTA: flash once over USB, then re-upload the web UI
   with `pio run -e <env> -t uploadfs` (the filesystem moves and shrinks to 128 KB, so its
