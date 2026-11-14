@@ -564,6 +564,18 @@ void setup() {
     // first request.
     const mcp::auth::Credentials mcpCreds = loadMcpCredentials();
     mcpHttp.setCredentials(mcpCreds);
+    // An HTTP session that owns a BLE scan, link or subscription is never
+    // evicted to make room for another session (it would drop the link).
+    mcpHttp.setPinnedCheck([](uint8_t cid) {
+#if BOARD_HAS_BLE
+        return featureRegistry.owner("ble.central.gatt") == cid ||
+               featureRegistry.owner("ble.central.scan") == cid ||
+               bleNotifyOwner == cid;
+#else
+        (void)cid;
+        return false;
+#endif
+    });
     networkManager.setRouteRegistrar([](AsyncWebServer& web) { mcpHttp.registerRoutes(web); });
 
     // Start network manager

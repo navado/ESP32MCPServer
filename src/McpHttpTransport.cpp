@@ -134,7 +134,11 @@ void McpHttpTransport::handlePost(AsyncWebServerRequest* req) {
         std::lock_guard<std::mutex> lock(mu_);
         int evicted = -1;
         const http::Session* s =
-            sessions_.create(access, millis(), []() { return esp_random(); }, &evicted);
+            sessions_.create(access, millis(), []() { return esp_random(); }, &evicted,
+                             [this](uint8_t cid) {
+                                 const uint32_t bit = cid - MCP_HTTP_CLIENT_BASE;
+                                 return bit >= 32 || !(pinnedMask_.load() & (1u << bit));
+                             });
         if (!s) {
             sendJsonError(req, 503, "Too many MCP sessions");
             return;
@@ -241,6 +245,13 @@ void McpHttpTransport::pump() {
     }
     for (uint8_t cid : expired) server_.removeClient(cid);
 
+    if (pinned_) {
+        uint32_t mask = 0;
+        for (uint32_t i = 0; i < 32; ++i)
+            if (pinned_(static_cast<uint8_t>(MCP_HTTP_CLIENT_BASE + i))) mask |= 1u << i;
+        pinnedMask_.store(mask);
+    }
+
     for (;;) {
         std::shared_ptr<Job> job;
         {
@@ -273,9 +284,12 @@ void McpHttpTransport::pump() {
                 job->response = server_.processMessage(job->clientId, job->body);
                 break;
             }
-            default:
+            default: {
                 job->response = server_.processMessage(job->clientId, job->body);
+                std::lock_guard<std::mutex> lock(mu_);
+                sessions_.touch(job->clientId, millis());
                 break;
+            }
         }
         job->body.clear();
         job->body.shrink_to_fit();

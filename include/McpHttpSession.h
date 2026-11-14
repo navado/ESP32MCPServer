@@ -29,12 +29,15 @@ public:
     // When full, create() may evict the least recently used session if it
     // has been idle for at least `evictIdleMs`.
     SessionTable(size_t capacity = 4, uint32_t idleMs = 10u * 60u * 1000u,
-                 uint32_t evictIdleMs = 1000);
+                 uint32_t evictIdleMs = 30u * 1000u);
 
     // Create a session.  `rnd` supplies randomness for the id.
     //
     // When every slot is in use and `evictedClientId` is given, the least
-    // recently used session idle for >= evictIdleMs is replaced, and its
+    // recently used session that is idle for >= evictIdleMs, has no more
+    // access than the new one (a read-only token never displaces a
+    // full-control session) and passes `mayEvict` (the firmware refuses
+    // sessions that own a BLE link, scan or subscription) is replaced, and its
     // client id is stored in *evictedClientId (else -1) so the caller can
     // release its server state first; the evicted client gets 404 on its
     // next request and starts a new session, as the spec requires.  Many
@@ -47,7 +50,12 @@ public:
     // to the caller (here or from expire()).
     const Session* create(auth::Access access, uint32_t nowMs,
                           const std::function<uint32_t()>& rnd,
-                          int* evictedClientId = nullptr);
+                          int* evictedClientId = nullptr,
+                          const std::function<bool(uint8_t clientId)>& mayEvict = nullptr);
+
+    // Mark a session as used now (a request on it just finished), so a
+    // long-running request does not leave it looking idle.
+    void touch(uint8_t clientId, uint32_t nowMs);
 
     // Live session by id (touches lastUsedMs), or nullptr.
     const Session* find(const std::string& id, uint32_t nowMs);

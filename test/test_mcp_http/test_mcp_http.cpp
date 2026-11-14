@@ -99,11 +99,11 @@ void test_session_full_table_evicts_least_recently_used(void) {
     int bcid = b->clientId;
     t.find(a, 2000);                          // a used recently, b idle since 100
     int evicted = -2;
-    const Session* c = t.create(auth::Access::ReadOnly, 2500, rnd, &evicted);
+    const Session* c = t.create(auth::Access::Full, 2500, rnd, &evicted);
     TEST_ASSERT_NOT_NULL(c);
     TEST_ASSERT_EQUAL(bcid, evicted);         // caller must release b's state
     TEST_ASSERT_EQUAL(bcid, c->clientId);     // c takes b's slot
-    TEST_ASSERT_TRUE(c->access == auth::Access::ReadOnly);
+    TEST_ASSERT_TRUE(c->id != bid);
     TEST_ASSERT_NULL(t.find(bid, 2600));      // b now gets 404
     TEST_ASSERT_NOT_NULL(t.find(a, 2600));
     TEST_ASSERT_EQUAL(2, (int)t.size());
@@ -125,6 +125,36 @@ void test_session_free_slot_preferred_over_eviction(void) {
     int evicted = -2;
     TEST_ASSERT_NOT_NULL(t.create(auth::Access::Full, 5000, rnd, &evicted));
     TEST_ASSERT_EQUAL(-1, evicted);
+}
+
+void test_session_read_only_never_evicts_full_control(void) {
+    SessionTable t(1, 600000, 1000);
+    t.create(auth::Access::Full, 0, rnd);
+    int evicted = -2;
+    TEST_ASSERT_NULL(t.create(auth::Access::ReadOnly, 50000, rnd, &evicted));
+    TEST_ASSERT_EQUAL(-1, evicted);
+    TEST_ASSERT_NOT_NULL(t.create(auth::Access::Full, 50000, rnd, &evicted));
+    TEST_ASSERT_EQUAL(MCP_HTTP_CLIENT_BASE, evicted);
+}
+
+void test_session_pinned_sessions_are_not_evicted(void) {
+    SessionTable t(2, 600000, 1000);
+    t.create(auth::Access::Full, 0, rnd);        // slot 0: owns a BLE link (pinned)
+    t.create(auth::Access::Full, 500, rnd);      // slot 1
+    int evicted = -2;
+    auto notSlot0 = [](uint8_t cid) { return cid != MCP_HTTP_CLIENT_BASE; };
+    TEST_ASSERT_NOT_NULL(t.create(auth::Access::Full, 9000, rnd, &evicted, notSlot0));
+    TEST_ASSERT_EQUAL(MCP_HTTP_CLIENT_BASE + 1, evicted);   // the older one is spared
+    auto none = [](uint8_t) { return false; };
+    TEST_ASSERT_NULL(t.create(auth::Access::Full, 20000, rnd, &evicted, none));
+}
+
+void test_session_touch_keeps_long_request_alive(void) {
+    SessionTable t(1, 600000, 1000);
+    uint8_t cid = t.create(auth::Access::Full, 0, rnd)->clientId;
+    t.touch(cid, 5000);                          // a 5 s request just finished
+    int evicted = -2;
+    TEST_ASSERT_NULL(t.create(auth::Access::Full, 5500, rnd, &evicted));
 }
 
 // --- origin -------------------------------------------------------------------
@@ -192,6 +222,9 @@ int main(int, char**) {
     RUN_TEST(test_session_full_table_evicts_least_recently_used);
     RUN_TEST(test_session_eviction_spares_sessions_in_use);
     RUN_TEST(test_session_free_slot_preferred_over_eviction);
+    RUN_TEST(test_session_read_only_never_evicts_full_control);
+    RUN_TEST(test_session_pinned_sessions_are_not_evicted);
+    RUN_TEST(test_session_touch_keeps_long_request_alive);
     RUN_TEST(test_host_only);
     RUN_TEST(test_origin_allowed);
     RUN_TEST(test_tool_schemas_are_valid_object_schemas);

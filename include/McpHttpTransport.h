@@ -27,6 +27,7 @@
 #include "McpHttpSession.h"
 #include <ESPAsyncWebServer.h>
 #include <atomic>
+#include <functional>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -43,6 +44,11 @@ public:
 
     // Run queued requests and expire idle sessions.  MCP task only.
     void pump();
+
+    // Sessions for which this returns true are never evicted to make room
+    // for a new one (e.g. they own a BLE link).  Evaluated on the MCP task
+    // in pump(); the web server task only reads the cached result.
+    void setPinnedCheck(std::function<bool(uint8_t clientId)> fn) { pinned_ = std::move(fn); }
 
     static constexpr size_t   MAX_BODY_BYTES = 16 * 1024;
     static constexpr size_t   MAX_QUEUED     = 8;
@@ -69,6 +75,8 @@ private:
     std::mutex        mu_;          // guards queue_ and sessions_
     std::deque<std::shared_ptr<Job>> queue_;
     http::SessionTable sessions_;
+    std::function<bool(uint8_t)> pinned_;
+    std::atomic<uint32_t> pinnedMask_{0};   // bit i: session slot i is pinned
 };
 
 } // namespace mcp

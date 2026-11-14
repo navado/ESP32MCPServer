@@ -9,7 +9,8 @@ SessionTable::SessionTable(size_t capacity, uint32_t idleMs, uint32_t evictIdleM
 
 const Session* SessionTable::create(auth::Access access, uint32_t nowMs,
                                     const std::function<uint32_t()>& rnd,
-                                    int* evictedClientId) {
+                                    int* evictedClientId,
+                                    const std::function<bool(uint8_t)>& mayEvict) {
     if (evictedClientId) *evictedClientId = -1;
     auto fill = [&](size_t i) -> const Session* {
         Slot& sl = slots_[i];
@@ -30,8 +31,12 @@ const Session* SessionTable::create(auth::Access access, uint32_t nowMs,
     size_t lru = slots_.size();
     uint32_t lruIdle = 0;
     for (size_t i = 0; i < slots_.size(); ++i) {
-        uint32_t idle = nowMs - slots_[i].s.lastUsedMs;
-        if (idle >= evictIdleMs_ && (lru == slots_.size() || idle > lruIdle)) {
+        const Session& cand = slots_[i].s;
+        uint32_t idle = nowMs - cand.lastUsedMs;
+        if (idle < evictIdleMs_) continue;
+        if (static_cast<int>(cand.access) > static_cast<int>(access)) continue;
+        if (mayEvict && !mayEvict(cand.clientId)) continue;
+        if (lru == slots_.size() || idle > lruIdle) {
             lru = i;
             lruIdle = idle;
         }
@@ -39,6 +44,12 @@ const Session* SessionTable::create(auth::Access access, uint32_t nowMs,
     if (lru == slots_.size()) return nullptr;
     *evictedClientId = slots_[lru].s.clientId;
     return fill(lru);
+}
+
+void SessionTable::touch(uint8_t clientId, uint32_t nowMs) {
+    for (auto& sl : slots_) {
+        if (sl.used && sl.s.clientId == clientId) sl.s.lastUsedMs = nowMs;
+    }
 }
 
 const Session* SessionTable::find(const std::string& id, uint32_t nowMs) {

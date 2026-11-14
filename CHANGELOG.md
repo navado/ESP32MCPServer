@@ -113,7 +113,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `DELETE /mcp` (the MCP Inspector CLI does this on every run) held all 4 sessions for
   10 minutes, so further clients got `503 Too many MCP sessions`, and the leaked sessions
   also counted toward the WebSocket limit (`4429`). A full table now replaces the least
-  recently used idle session, and HTTP sessions no longer use WebSocket client slots.
+  recently used session idle for 30 s or more. It never replaces a session that owns a BLE
+  scan, link or subscription, nor a full-control session for a read-only one. HTTP
+  sessions no longer use WebSocket client slots.
 - Boot loop on startup: lwIP was used before initialisation (`Invalid mbox`). — #9
 - Uncaught exceptions in MCP method handlers rebooted the board; they now return a
   JSON-RPC `-32603` error. — #9
