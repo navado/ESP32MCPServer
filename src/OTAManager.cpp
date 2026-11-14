@@ -6,16 +6,39 @@
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 #include <esp_ota_ops.h>
+#include <esp_random.h>
 
 // ---------------------------------------------------------------------------
 OTAManager::OTAManager() {}
 
+String OTAManager::generatePassword() {
+    return String(mcp::auth::generateToken([]() { return esp_random(); }, 12).c_str());
+}
+
 void OTAManager::begin() {
     preferences_.begin(OTA_NVS_NAMESPACE, /*readOnly=*/true);
-    password_ = preferences_.getString(OTA_NVS_PWD_KEY, OTA_DEFAULT_PASSWORD);
+    password_ = preferences_.getString(OTA_NVS_PWD_KEY, "");
     preferences_.end();
-    Serial.printf("[OTA] Manager ready (password %s)\n",
-                  password_ == OTA_DEFAULT_PASSWORD ? "is default — change it!" : "is set");
+    // No working default: generate a per-device password on first boot, and
+    // replace the old compiled-in "admin" default if a device still has it.
+    if (password_.isEmpty() || password_ == OTA_LEGACY_DEFAULT_PASSWORD) {
+        setPassword(generatePassword());
+        Serial.println("[OTA] ==================================================");
+        Serial.printf ("[OTA] Generated OTA password (user '%s'): %s\n",
+                       OTA_USERNAME, password_.c_str());
+        Serial.println("[OTA] Shown once. 'ota show' / 'ota rotate' on this console.");
+        Serial.println("[OTA] ==================================================");
+    } else {
+        Serial.println("[OTA] Manager ready (password is set)");
+    }
+}
+
+String OTAManager::rotatePassword() {
+    String p = generatePassword();
+    preferences_.begin(OTA_NVS_NAMESPACE, /*readOnly=*/false);
+    preferences_.putString(OTA_NVS_PWD_KEY, p);
+    preferences_.end();
+    return p;
 }
 
 void OTAManager::setPassword(const String& newPassword) {
@@ -62,8 +85,45 @@ void OTAManager::registerRoutes(AsyncWebServer& server) {
 // Authentication
 // ---------------------------------------------------------------------------
 
-bool OTAManager::authenticate(AsyncWebServerRequest* request) const {
-    return request->authenticate(OTA_USERNAME, password_.c_str());  // OTA_USERNAME from build flags
+uint32_t OTAManager::sourceKey(AsyncWebServerRequest* request) {
+    AsyncClient* c = request->client();
+    return c ? static_cast<uint32_t>(c->remoteIP()) : 0u;
+}
+
+bool OTAManager::authenticate(AsyncWebServerRequest* request, bool countFailure) const {
+    const uint32_t now = millis();
+    const uint32_t src = sourceKey(request);
+    if (lockouts_.locked(src, now)) return false;
+    // A request without credentials is the normal first step of the browser
+    // Basic Auth flow; only WRONG credentials count as failures.
+    const bool hasCreds = request->hasHeader("Authorization");
+    const bool ok = request->authenticate(OTA_USERNAME, password_.c_str());
+    if (ok) {
+        lockouts_.recordSuccess(src);
+    } else if (hasCreds && countFailure) {
+        lockouts_.recordFailure(src, now);
+        if (lockouts_.locked(src, now)) {
+            Serial.printf("[OTA] repeated failed logins from %s: locked for %u ms\n",
+                          request->client() ? request->client()->remoteIP().toString().c_str() : "?",
+                          (unsigned)lockouts_.retryAfterMs(src, now));
+        }
+    }
+    return ok;
+}
+
+bool OTAManager::requireAuth(AsyncWebServerRequest* request) const {
+    if (authenticate(request)) return true;
+    const uint32_t now = millis();
+    const uint32_t src = sourceKey(request);
+    if (lockouts_.locked(src, now)) {
+        AsyncWebServerResponse* resp = request->beginResponse(
+            429, "text/plain", "Too many failed logins; try again later");
+        resp->addHeader("Retry-After", String((lockouts_.retryAfterMs(src, now) + 999) / 1000));
+        request->send(resp);
+        return false;
+    }
+    request->requestAuthentication();
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -134,10 +194,7 @@ void OTAManager::handleStatusGet(AsyncWebServerRequest* request) const {
 // ---------------------------------------------------------------------------
 
 void OTAManager::handleUpdatePost(AsyncWebServerRequest* request) {
-    if (!authenticate(request)) {
-        request->requestAuthentication();
-        return;
-    }
+    if (!requireAuth(request)) return;
 
     bool ok = !Update.hasError();
     String msg = ok ? "Update successful — rebooting." : ("Update failed: " + lastErrorMsg_);
@@ -157,8 +214,9 @@ void OTAManager::handleUpdateUpload(AsyncWebServerRequest* request,
                                     const String& /*filename*/,
                                     size_t index, uint8_t* data,
                                     size_t len, bool final) {
-    // Re-check auth on each chunk to prevent unauthenticated stream injection.
-    if (!authenticate(request)) return;
+    // Re-check auth on each chunk to prevent unauthenticated stream injection,
+    // but count a wrong password once per request, not once per chunk.
+    if (!authenticate(request, /*countFailure=*/index == 0)) return;
 
     if (index == 0) {
         uploadError_ = false;
@@ -200,14 +258,10 @@ void OTAManager::handleUpdateUpload(AsyncWebServerRequest* request,
 // ---------------------------------------------------------------------------
 
 void OTAManager::handleConfigGet(AsyncWebServerRequest* request) const {
-    if (!authenticate(request)) {
-        request->requestAuthentication();
-        return;
-    }
+    if (!requireAuth(request)) return;
     JsonDocument doc;
     doc["username"]        = OTA_USERNAME;
     doc["passwordIsSet"]   = true;
-    doc["isDefaultPwd"]    = (password_ == OTA_DEFAULT_PASSWORD);
     String json;
     serializeJson(doc, json);
     AsyncResponseStream* resp = request->beginResponseStream("application/json");
@@ -220,10 +274,7 @@ void OTAManager::handleConfigGet(AsyncWebServerRequest* request) const {
 // ---------------------------------------------------------------------------
 
 void OTAManager::handleConfigPost(AsyncWebServerRequest* request) {
-    if (!authenticate(request)) {
-        request->requestAuthentication();
-        return;
-    }
+    if (!requireAuth(request)) return;
     if (!request->hasParam("password", true)) {
         request->send(400, "text/plain", "Missing 'password' field");
         return;

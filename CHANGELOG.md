@@ -5,6 +5,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Security
+- **Optional MCP access tokens** — #12
+  - **Off by default**: existing clients and examples keep working unchanged. Turn it on
+    with the serial command `auth on` (or `auth off` to undo), or ship it on with the
+    build flag `MCP_AUTH_DEFAULT=1`. Stored in NVS `security`/`auth`.
+  - Full-control token, plus an optional read-only token, stored in NVS namespace
+    `security`. Sent as `Authorization: Bearer <token>` or `?token=<token>`.
+  - Generated and printed on the serial console when auth is turned on. Managed with the
+    serial commands `token show|rotate|set`, `token ro rotate|clear`, `ota show|rotate`.
+  - With auth on, unauthenticated connections are closed with code 4401, and a read-only
+    token calling a state-changing method gets `-32020`.
+  - Limits: at most 4 clients (close code 4429); per-client rate limit of burst 20, then
+    10/s (`-32021`); a heartbeat drops dead clients.
+  - The dashboard and `examples/client/client.ts` take an optional token.
+- **OTA has no default password** — #12. A random per-device password is generated on
+  first boot (also replacing a stored `admin`). Repeated failed logins from one IP lock
+  that IP out with `429`.
+
 ### Added
 - **Bluetooth LE over MCP (ESP32-S3)** — #9, #11
   - Advertising scanner: `ble/scan`, `ble/scan/results`, `ble/scan/payloads`, `ble/scan/poll`, `ble/scan/stop`.
@@ -22,6 +40,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `partitions_4mb_ota.csv` with 1.81 MB OTA slots for 4 MB ESP32 boards — #9.
 
 ### Changed
+- **Upgrading:** MCP clients are unaffected (authentication is off until `auth on`). The
+  OTA password changes if it was still `admin`, and the `isDefaultPwd` field is gone from
+  `/ota/config` — #12.
+- **`esp32-c3-devkitm-1` moves to `partitions_4mb_ota.csv`** (the firmware outgrew the
+  1.25 MB app slots). Flash once over USB, then `-t uploadfs`; NVS is kept — #12.
 - **4 MB boards (`esp32-devkitc`, `adafruit-huzzah32`, `m5stack-core`) use a new partition
   table.** It cannot be applied over OTA: flash once over USB, then re-upload the web UI
   with `pio run -e <env> -t uploadfs` (the filesystem moves and shrinks to 128 KB, so its

@@ -105,7 +105,24 @@ All ESP32 envs extend `[esp32_base]`, which pins `platform = platformio/espressi
 pioarduino / Arduino core 3.x platform installed it resolves to that platform, whose
 `Network/NetworkManager.h` shadows this project's header and breaks the build.
 
-This env keeps the default 4 MB partition layout (the RISC-V build fits the 1.25 MB app slots).
+### Flash layout and upgrading existing boards
+
+This env uses `partitions_4mb_ota.csv`, like the other 4 MB boards (the firmware no longer
+fits the default layout's 1.25 MB app slots):
+
+| Partition | Offset | Size | Contents |
+|---|---|---|---|
+| nvs | 0x9000 | 20 KB | WiFi credentials, OTA password, MCP tokens (same offset as before) |
+| otadata | 0xE000 | 8 KB | OTA slot selection |
+| app0 / app1 | 0x10000 / 0x1E0000 | 1.81 MB each | firmware (OTA A/B) |
+| spiffs | 0x3B0000 | 128 KB | LittleFS: web UI, bus-history config, metrics |
+| coredump | 0x3D0000 | 64 KB | crash dumps |
+
+> **Upgrading a board that runs older firmware:** a partition table cannot be changed over
+> OTA, so flash **over USB** once (`pio run -e esp32-c3-devkitm-1 -t upload`, which writes
+> the bootloader, partition table and app). The filesystem moves and shrinks, so its
+> contents are lost: re-upload the web UI with `pio run -e esp32-c3-devkitm-1 -t uploadfs`.
+> NVS is unchanged, so WiFi credentials, the OTA password and MCP tokens are kept.
 
 ## Notes
 
@@ -115,3 +132,7 @@ This env keeps the default 4 MB partition layout (the RISC-V build fits the 1.25
 - **No Classic Bluetooth**: Only BLE 5.0 is available.
 - **Strapping pins**: GPIO2, GPIO8, GPIO9 affect boot mode.  GPIO8 is already
   the LED pin; do not pull it LOW externally.
+
+## Security
+
+MCP authentication is off by default; type `auth on` on the serial console to require an access token (it is generated and printed; `token show` prints it again). OTA uses a random per-device password printed at first boot (`ota show`). **There is no TLS on this board:** the token and data travel in clear text, so use it on a trusted network. See [Security](../../README.md#security).

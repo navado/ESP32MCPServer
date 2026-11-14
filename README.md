@@ -43,7 +43,7 @@ Connect an AI agent directly to your hardware: query I2C sensors, parse NMEA 018
 | **Adafruit HUZZAH32** | `adafruit-huzzah32` | Xtensa LX6 × 2 @ 240 MHz | 4 MB | 520 KB | ✓ | ✗¹ | ✓ | — |
 | **M5Stack Core ESP32** | `m5stack-core` | Xtensa LX6 × 2 @ 240 MHz | 16 MB | 520 KB | ✓ | ✗¹ | ✗ | — |
 
-¹ 4 MB-flash boards: the BLE stack + the MCP WebSocket server + OTA cannot all fit the 1.25 MB OTA app slot, so BLE is compiled out (the hardware still supports it). BLE is available on the ESP32-S3 (8 MB flash). `esp32-devkitc`, `adafruit-huzzah32` and `m5stack-core` also use a larger-app partition table (`partitions_4mb_ota.csv`): **upgrading an existing board requires one USB flash and re-uploading the filesystem** — see the board pages in [`docs/boards/`](docs/boards/) and the [CHANGELOG](CHANGELOG.md).
+¹ 4 MB-flash boards: the BLE stack + the MCP WebSocket server + OTA cannot all fit the 1.25 MB OTA app slot, so BLE is compiled out (the hardware still supports it). BLE is available on the ESP32-S3 (8 MB flash). `esp32-devkitc`, `esp32-c3-devkitm-1`, `adafruit-huzzah32` and `m5stack-core` also use a larger-app partition table (`partitions_4mb_ota.csv`): **upgrading an existing board requires one USB flash and re-uploading the filesystem** — see the board pages in [`docs/boards/`](docs/boards/) and the [CHANGELOG](CHANGELOG.md).
 
 ² PSRAM mode (octal vs quad) is fixed at build time, so modules with 8 MB octal PSRAM (N8R8/N16R8; `esptool.py chip_id` reports "Embedded PSRAM 8MB") need the `-n16r8` env. Do not flash that env on DevKitC-1 variants without PSRAM or with quad PSRAM (N8R2).
 
@@ -270,7 +270,67 @@ pio run -t upload -e nrf52840-dk
 2. Connect to that AP and open **`http://192.168.4.1`**.
 3. Enter your WiFi credentials and click Save.
 4. The board joins your network and prints its IP address on the serial console.
-5. Connect an MCP client to **`ws://<IP>:9000`**.
+5. Connect an MCP client to **`ws://<IP>:9000`**. MCP authentication is **off by default**, so the examples below work as-is on a trusted network. To require a token, type `auth on` on the serial console (or build with `-D MCP_AUTH_DEFAULT=1`); see [Security](#security).
+6. On first boot the serial console prints a generated **OTA password** (`ota show` prints it again).
+
+---
+
+## Security
+
+The device is meant for a **trusted LAN**. MCP authentication is **optional and off by default**: out of the box any host that can reach the device can use it, exactly as before. Turn it on for anything but a lab bench. There is no TLS yet (see below).
+
+**Turning authentication on or off** (NVS namespace `security`, key `auth`):
+
+| How | Effect |
+|---|---|
+| Serial console `auth on` | Require a token. A full-control token is generated and printed if none exists. Reboots |
+| Serial console `auth off` | Accept clients without a token again (stored tokens are kept). Reboots |
+| `-D MCP_AUTH_DEFAULT=1` build flag | Ship boards with authentication on (used when the `auth` key is absent) |
+| NVS image | Pre-provision `auth`, `token` and `ro_token` like the WiFi credentials |
+
+When authentication is off every client has full control. Rate limits, the client limit and the Origin check stay active either way.
+
+**Threat model.** With authentication off, any host that can reach port 9000 could open BLE connections to nearby devices, read sensor, bus and metrics data, clear logs, and tie up the server. Turning it on stops an unauthenticated host on the network from doing any of that. It does **not** protect against someone who can sniff the traffic: the token and all data travel in clear text over `ws://`, and the OTA password over plain HTTP Basic Auth. Physical access to the USB serial console is trusted: it can show and change every secret.
+
+**MCP access tokens** (NVS namespace `security`; used only when authentication is on):
+
+| Token | Key | Access |
+|---|---|---|
+| Full control | `token` | Every method |
+| Read-only (optional) | `ro_token` | Observation only, nothing that changes shared state: `initialize`, `resources/*`, `sensors/read`, `metrics/*`, `logs/query`, `bus/history/read`, `bus/history/config/get`, `ble/scan/poll`, `ble/connect/results`. Starting or stopping the shared BLE scan (`ble/scan`, `ble/scan/stop`, `ble/scan/results`, `ble/scan/payloads`), `sensors/i2c/scan` (it writes init commands to devices), `ble/connect`, `ble/services/*`, `ble/disconnect`, `logs/clear`, `bus/history/config/set` and any method not on the list need full control |
+
+- When authentication is on and no token exists, a random 128-bit token is generated and printed on the serial console (`token show` prints it again).
+- Clients send it as `Authorization: Bearer <token>` or, from browsers (which cannot set WebSocket headers), as `?token=<token>`.
+- A connection without a valid token is closed with WebSocket close code **4401** before any message is processed. A read-only client calling a full-control method gets `-32020` (`data.required: "full"`).
+
+**Serial console** (115200 baud on UART0; on the ESP32-S3-DevKitC-1 that is the USB port labelled **UART/COM**, not the native USB port; type `help`):
+
+| Command | Effect |
+|---|---|
+| `auth status` / `auth on` / `auth off` | Show / require / stop requiring a token; on and off reboot |
+| `token show` | Print both tokens |
+| `token rotate` / `token set <value>` | New random / chosen (≥ 16 chars) full-control token; reboots to apply |
+| `token ro rotate` / `token ro clear` | New / remove the read-only token; reboots |
+| `ota show` / `ota rotate` | Print / replace the OTA password (rotate reboots) |
+
+Tokens can also be pre-provisioned in an NVS image, like the WiFi credentials.
+
+**Resource limits.**
+
+| Limit | Default | Build flag | When exceeded |
+|---|---|---|---|
+| Concurrent MCP clients | 4 | `MCP_MAX_CLIENTS` | Close code **4429** |
+| Requests per client | burst 20, then 10/s | `MCP_RATE_BURST`, `MCP_RATE_PER_SEC` | `-32021 Rate limited` with `data.retryAfterMs` |
+| Idle clients | ping every 15 s | — | Dropped after 2 missed pongs |
+
+**OTA.**
+- There is no compiled-in default password. A random per-device password is generated on first boot, and also on a device that still holds the old `admin` default. It is printed once on the serial console.
+- After 5 consecutive wrong logins **from one IP address**, that address gets `429` (with `Retry-After`) for 30 s, doubling up to 5 minutes per further failure. Other hosts are not affected, so a guessing host can't lock the owner out. Up to 32 source addresses are tracked. Beyond that, the remaining sources share one lockout, so rotating addresses doesn't buy extra guesses. The tradeoff: an attacker with more than 32 failing LAN addresses can delay OTA logins from new hosts for a few minutes. USB flashing and the serial console are never affected.
+
+**Not covered yet.**
+- **TLS (`wss://`).** The WebSocket library used here has no server-side TLS on ESP32. On the 4 MB boards there is no flash headroom for it at all. On the ESP32-S3 it needs a different server stack, which is planned with the Streamable HTTP transport (#13). Until then, use a trusted network, or a TLS-terminating proxy or VPN.
+- The port-80 HTTP endpoints (dashboard, WiFi setup, `/bus-history`) are unauthenticated.
+- OAuth 2.1 (MCP authorization for HTTP transports) doesn't fit on the device. The static bearer token matches how MCP clients send `Authorization`, so it carries over to Streamable HTTP.
 
 ---
 
@@ -303,7 +363,7 @@ A browser-based dashboard is served from flash at **`http://<IP>/app`**.
 
 ## MCP API Reference (WebSocket port 9000)
 
-All methods use **JSON-RPC 2.0** over WebSocket.
+All methods use **JSON-RPC 2.0** over WebSocket. Connections require an access token (see [Security](#security)).
 
 ### Protocol
 

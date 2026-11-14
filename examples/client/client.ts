@@ -1,6 +1,17 @@
+// WebSocket close codes the server uses to refuse a connection (issue #12).
+const WS_CLOSE_UNAUTHORIZED = 4401;
+const WS_CLOSE_TOO_MANY_CLIENTS = 4429;
+
 class MCPClient {
-    constructor(url) {
+    // options.token          MCP access token (serial console: `token show`).
+    // options.WebSocketImpl  a WebSocket class that accepts request headers,
+    //                        e.g. require('ws') in Node.  When given, the token
+    //                        is sent as `Authorization: Bearer <token>`;
+    //                        otherwise (browsers) it goes in `?token=`.
+    constructor(url, options = {}) {
         this.url = url;
+        this.token = options.token || '';
+        this.WebSocketImpl = options.WebSocketImpl || null;
         this.ws = null;
         this.requestId = 1;
         this.callbacks = new Map();
@@ -13,7 +24,7 @@ class MCPClient {
     
     connect() {
         return new Promise((resolve, reject) => {
-            this.ws = new WebSocket(this.url);
+            this.ws = this.openSocket();
             
             this.ws.onopen = () => {
                 console.log('Connected to MCP server');
@@ -31,9 +42,17 @@ class MCPClient {
                 }
             };
             
-            this.ws.onclose = () => {
-                console.log('Connection closed');
+            this.ws.onclose = (event) => {
+                console.log('Connection closed', event && event.code);
                 this.stopHeartbeat();
+                if (event && event.code === WS_CLOSE_UNAUTHORIZED) {
+                    // Retrying with the same token cannot succeed.
+                    reject(new Error('MCP server rejected the access token (4401)'));
+                    return;
+                }
+                if (event && event.code === WS_CLOSE_TOO_MANY_CLIENTS) {
+                    console.log('Server is at its client limit; retrying');
+                }
                 this.handleReconnect();
             };
             
@@ -44,6 +63,16 @@ class MCPClient {
         });
     }
     
+    openSocket() {
+        if (this.WebSocketImpl) {
+            const headers = this.token ? { Authorization: `Bearer ${this.token}` } : {};
+            return new this.WebSocketImpl(this.url, { headers });
+        }
+        if (!this.token) return new WebSocket(this.url);
+        const sep = this.url.includes('?') ? '&' : '?';
+        return new WebSocket(`${this.url}${sep}token=${encodeURIComponent(this.token)}`);
+    }
+
     disconnect() {
         if (this.ws) {
             this.ws.close();
@@ -172,7 +201,9 @@ class MCPClient {
 
 // Example usage:
 async function connectToMCP() {
-    const client = new MCPClient('ws://your-esp32-ip:9000');
+    // Browser: token goes in ?token=.  Node: pass { WebSocketImpl: require('ws') }
+    // to send it as an Authorization header instead.
+    const client = new MCPClient('ws://your-esp32-ip:9000', { token: 'your-mcp-token' });
     
     try {
         // Connect and initialize

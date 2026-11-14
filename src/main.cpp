@@ -12,6 +12,27 @@
 #include "OTAManager.h"
 #include "BLEScanner.h"
 #include "MemoryPlan.h"
+#include "AuthPolicy.h"
+#include <Preferences.h>
+#include <esp_random.h>
+
+// MCP authentication is OFF unless configured: NVS "security"/"auth" (set
+// with the serial console command `auth on`) or, when that key is absent,
+// this build default.  -D MCP_AUTH_DEFAULT=1 ships boards with auth on.
+#ifndef MCP_AUTH_DEFAULT
+#define MCP_AUTH_DEFAULT 0
+#endif
+// Resource limits for the MCP WebSocket (the library itself allows at most
+// WEBSOCKETS_SERVER_CLIENT_MAX = 5 sockets).
+#ifndef MCP_MAX_CLIENTS
+#define MCP_MAX_CLIENTS 4
+#endif
+#ifndef MCP_RATE_BURST
+#define MCP_RATE_BURST 20       // requests
+#endif
+#ifndef MCP_RATE_PER_SEC
+#define MCP_RATE_PER_SEC 10     // sustained requests per second per client
+#endif
 
 #ifndef BOARD_BUS_HISTORY_HEAP_CAP
 #define BOARD_BUS_HISTORY_HEAP_CAP 0
@@ -124,6 +145,156 @@ OTAManager        otaManager;
 #if BOARD_HAS_BLE
 mcp::BLEScanner   bleScanner;
 #endif
+
+// ---------------------------------------------------------------------------
+// MCP transport credentials (issue #12)
+//
+// NVS namespace "security": "auth" (u8: 1 = clients need a token; absent =
+// MCP_AUTH_DEFAULT), "token" (full control), "ro_token" (read-only,
+// optional).  When auth is on and no token is provisioned, a random 128-bit
+// token is generated and printed on the serial console; afterwards it can be
+// shown or rotated only from the serial console (physical access).
+// ---------------------------------------------------------------------------
+static const char* const SEC_NVS_NAMESPACE = "security";
+static const char* const SEC_KEY_AUTH      = "auth";
+static const char* const SEC_KEY_TOKEN     = "token";
+static const char* const SEC_KEY_RO_TOKEN  = "ro_token";
+static constexpr size_t  MIN_TOKEN_LEN     = 16;
+
+static std::string newToken() {
+    return mcp::auth::generateToken([]() { return esp_random(); }, 16);
+}
+
+static mcp::auth::Credentials loadMcpCredentials() {
+    mcp::auth::Credentials c;
+    Preferences prefs;
+    prefs.begin(SEC_NVS_NAMESPACE, /*readOnly=*/false);
+    c.required  = prefs.getUChar(SEC_KEY_AUTH, MCP_AUTH_DEFAULT ? 1 : 0) != 0;
+    c.fullToken = prefs.getString(SEC_KEY_TOKEN, "").c_str();
+    c.readToken = prefs.getString(SEC_KEY_RO_TOKEN, "").c_str();
+    if (c.required && c.fullToken.empty()) {
+        c.fullToken = newToken();
+        prefs.putString(SEC_KEY_TOKEN, c.fullToken.c_str());
+        Serial.println("[security] ==================================================");
+        Serial.printf ("[security] Generated MCP access token: %s\n", c.fullToken.c_str());
+        Serial.println("[security] Clients must send 'Authorization: Bearer <token>'");
+        Serial.println("[security] or connect to ws://<device>:9000/?token=<token>.");
+        Serial.println("[security] Type 'help' on this console to manage it.");
+        Serial.println("[security] ==================================================");
+    }
+    prefs.end();
+    if (c.required) {
+        Serial.printf("[security] MCP authentication ON (read-only token %s)\n",
+                      c.readToken.empty() ? "not set" : "set");
+    } else {
+        Serial.println("[security] MCP authentication OFF (default): any host on the "
+                       "network can use this device. Type 'auth on' to require a token.");
+    }
+    return c;
+}
+
+static void storeSecret(const char* key, const std::string& value) {
+    Preferences prefs;
+    prefs.begin(SEC_NVS_NAMESPACE, false);
+    if (value.empty()) prefs.remove(key);
+    else               prefs.putString(key, value.c_str());
+    prefs.end();
+}
+
+// Serial console commands.  Credential changes are persisted and applied by
+// rebooting, so no task ever sees half-updated credentials.
+static void handleSerialCommand(const String& line) {
+    String cmd = line;
+    cmd.trim();
+    if (cmd.isEmpty()) return;
+    auto rebootToApply = []() {
+        Serial.println("[security] Saved. Rebooting to apply...");
+        delay(200);
+        ESP.restart();
+    };
+    if (cmd == "help") {
+        Serial.println("Commands:");
+        Serial.println("  auth status           is MCP authentication on?");
+        Serial.println("  auth on               require a token (generated if none; reboots)");
+        Serial.println("  auth off              accept clients without a token (reboots)");
+        Serial.println("  token show            print the MCP tokens");
+        Serial.println("  token rotate          new full-control token (reboots)");
+        Serial.println("  token set <value>     set the full-control token, >= 16 chars (reboots)");
+        Serial.println("  token ro rotate       new read-only token (reboots)");
+        Serial.println("  token ro clear        remove the read-only token (reboots)");
+        Serial.println("  ota show              print the OTA password");
+        Serial.println("  ota rotate            new random OTA password (reboots)");
+        return;
+    }
+    if (cmd == "auth status") {
+        Preferences prefs;
+        prefs.begin(SEC_NVS_NAMESPACE, true);
+        const bool on = prefs.getUChar(SEC_KEY_AUTH, MCP_AUTH_DEFAULT ? 1 : 0) != 0;
+        prefs.end();
+        Serial.printf("[security] MCP authentication %s\n", on ? "ON" : "OFF");
+        return;
+    }
+    if (cmd == "auth on" || cmd == "auth off") {
+        Preferences prefs;
+        prefs.begin(SEC_NVS_NAMESPACE, false);
+        prefs.putUChar(SEC_KEY_AUTH, cmd == "auth on" ? 1 : 0);
+        prefs.end();
+        rebootToApply();   // a token is generated (and printed) on boot if needed
+        return;
+    }
+    if (cmd == "token show") {
+        Preferences prefs;
+        prefs.begin(SEC_NVS_NAMESPACE, true);
+        String full = prefs.getString(SEC_KEY_TOKEN, "");
+        String ro   = prefs.getString(SEC_KEY_RO_TOKEN, "");
+        prefs.end();
+        Serial.printf("[security] full-control token: %s\n", full.isEmpty() ? "(none)" : full.c_str());
+        Serial.printf("[security] read-only token:    %s\n", ro.isEmpty() ? "(none)" : ro.c_str());
+        return;
+    }
+    if (cmd == "token rotate") {
+        std::string t = newToken();
+        storeSecret(SEC_KEY_TOKEN, t);
+        Serial.printf("[security] New full-control token: %s\n", t.c_str());
+        rebootToApply();
+        return;
+    }
+    if (cmd.startsWith("token set ")) {
+        String v = cmd.substring(10);
+        v.trim();
+        if (v.length() < MIN_TOKEN_LEN || v.indexOf(' ') >= 0) {
+            Serial.printf("[security] Token must be at least %u characters, no spaces.\n",
+                          (unsigned)MIN_TOKEN_LEN);
+            return;
+        }
+        storeSecret(SEC_KEY_TOKEN, v.c_str());
+        rebootToApply();
+        return;
+    }
+    if (cmd == "token ro rotate") {
+        std::string t = newToken();
+        storeSecret(SEC_KEY_RO_TOKEN, t);
+        Serial.printf("[security] New read-only token: %s\n", t.c_str());
+        rebootToApply();
+        return;
+    }
+    if (cmd == "token ro clear") {
+        storeSecret(SEC_KEY_RO_TOKEN, "");
+        rebootToApply();
+        return;
+    }
+    if (cmd == "ota show") {
+        Serial.printf("[OTA] user: %s  password: %s\n", OTA_USERNAME, otaManager.getPassword().c_str());
+        return;
+    }
+    if (cmd == "ota rotate") {
+        String p = otaManager.rotatePassword();
+        Serial.printf("[OTA] New password: %s\n", p.c_str());
+        rebootToApply();
+        return;
+    }
+    Serial.printf("Unknown command '%s' (type 'help')\n", cmd.c_str());
+}
 
 // Task handles
 TaskHandle_t mcpTaskHandle = nullptr;
@@ -288,7 +459,11 @@ void setup() {
     Serial.print("Device IP: ");
     Serial.println(networkManager.getIPAddress());
 
-    // Initialize MCP server
+    // Initialize MCP server — authenticated unless this is a lab build with
+    // no token provisioned (see loadMcpCredentials()).
+    mcpServer.setCredentials(loadMcpCredentials());
+    mcpServer.setMaxClients(MCP_MAX_CLIENTS);
+    mcpServer.setRateLimit(MCP_RATE_BURST, MCP_RATE_PER_SEC);
     mcpServer.begin(networkManager.isConnected());
     // Immediately announce MCP capability so LAN listeners learn the server
     // is ready (sensor list is still empty at this point; will be updated
@@ -765,7 +940,18 @@ void setup() {
 }
 
 void loop() {
-    // Main loop can be used for other tasks
-    // Network and MCP handling is done in their respective tasks
-    delay(1000);
+    // Network and MCP handling run in their own tasks; the loop task serves
+    // the serial console (credential management needs physical access).
+    static String line;
+    while (Serial.available()) {
+        char c = static_cast<char>(Serial.read());
+        if (c == '\r') continue;
+        if (c == '\n') {
+            handleSerialCommand(line);
+            line = "";
+        } else if (line.length() < 128) {
+            line += c;
+        }
+    }
+    delay(20);
 }

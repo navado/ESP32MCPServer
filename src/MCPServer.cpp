@@ -2,6 +2,9 @@
 #include "MCPTypes.h"
 #include <ArduinoJson.h>
 #include <new>
+#ifndef NATIVE_TEST
+#include <Arduino.h>
+#endif
 
 using namespace mcp;
 
@@ -23,7 +26,19 @@ void MCPServer::begin(bool /*isConnected*/) {
     wsServer_.onEvent([this](uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
         this->onWebSocketEvent(num, type, payload, length);
     });
+    wsServer_.setGate([this](uint8_t num, const String& authorization,
+                             const String& url) -> uint16_t {
+        switch (admitClient(num, authorization.c_str(), url.c_str())) {
+            case Admission::Accepted:       return 0;
+            case Admission::TooManyClients: return auth::WS_CLOSE_TOO_MANY_CLIENTS;
+            default:                        return auth::WS_CLOSE_UNAUTHORIZED;
+        }
+    });
     wsServer_.begin();
+    // Drop clients that stop answering pings (half-open TCP, sleeping
+    // laptops) so they do not hold one of the few client slots: ping every
+    // 15 s, give up after 2 missed pongs of 5 s.
+    wsServer_.enableHeartbeat(15000, 5000, 2);
 #endif
 }
 
@@ -34,6 +49,21 @@ void MCPServer::handleClient() {
 }
 
 #ifndef NATIVE_TEST
+void GatedWebSocketsServer::runCbEvent(uint8_t num, WStype_t type, uint8_t* payload,
+                                       size_t length) {
+    if (type == WStype_CONNECTED && gate_ && num < WEBSOCKETS_SERVER_CLIENT_MAX) {
+        WSclient_t* client = &_clients[num];
+        uint16_t code = gate_(num, client->base64Authorization, client->cUrl);
+        if (code != 0) {
+            // Close frame carries only the code (the library writes `reason`
+            // without the mandatory 2-byte code prefix).
+            WebSockets::clientDisconnect(client, code);
+            return;  // the application never sees this client
+        }
+    }
+    WebSocketsServer::runCbEvent(num, type, payload, length);
+}
+
 void MCPServer::onWebSocketEvent(uint8_t num, WStype_t type, uint8_t* payload, size_t length) {
     switch (type) {
         case WStype_CONNECTED:
@@ -92,6 +122,78 @@ void MCPServer::unregisterMethodHandler(const std::string& method) {
 }
 
 // ---------------------------------------------------------------------------
+// Transport security
+// ---------------------------------------------------------------------------
+
+void MCPServer::setCredentials(const auth::Credentials& creds) {
+    creds_        = creds;
+    authEnforced_ = true;
+}
+
+void MCPServer::setRateLimit(uint32_t capacity, uint32_t perSec) {
+    rateCapacity_ = capacity;
+    ratePerSec_   = perSec;
+}
+
+uint32_t MCPServer::now() const {
+    if (clock_) return clock_();
+#ifndef NATIVE_TEST
+    return millis();
+#else
+    return 0;
+#endif
+}
+
+MCPServer::Admission MCPServer::admitClient(uint8_t clientId,
+                                            const std::string& authorization,
+                                            const std::string& url) {
+    auth::Access access = authEnforced_
+                              ? auth::authenticate(creds_, authorization, url)
+                              : auth::Access::Full;
+    if (access == auth::Access::None) return Admission::Unauthorized;
+    // A reused slot replaces its previous occupant; otherwise enforce the cap.
+    if (clients_.find(clientId) == clients_.end() && clients_.size() >= maxClients_) {
+        return Admission::TooManyClients;
+    }
+    ClientState st;
+    st.access  = access;
+    st.limiter = auth::RateLimiter(rateCapacity_, ratePerSec_);
+    clients_[clientId] = st;
+    return Admission::Accepted;
+}
+
+auth::Access MCPServer::clientAccess(uint8_t clientId) const {
+    auto it = clients_.find(clientId);
+    return it == clients_.end() ? auth::Access::None : it->second.access;
+}
+
+std::string MCPServer::checkRequest(uint8_t clientId, const std::string& method,
+                                    uint32_t id) {
+    auto it = clients_.find(clientId);
+    if (it == clients_.end()) {
+        // Not admitted through the transport gate.  Only reachable when
+        // authentication is enforced (tests and the open mode skip it).
+        if (!authEnforced_) return std::string();
+        return makeError(id, auth::ERR_UNAUTHORIZED, "Unauthorized");
+    }
+    ClientState& st = it->second;
+    if (!st.limiter.allow(now())) {
+        JsonDocument data;
+        data["retryAfterMs"] = st.limiter.retryAfterMs();
+        return makeErrorData(id, auth::ERR_RATE_LIMITED, "Rate limited", data);
+    }
+    if (!auth::methodAllowed(st.access, method)) {
+        JsonDocument data;
+        data["method"]   = method;
+        data["access"]   = auth::accessName(st.access);
+        data["required"] = auth::accessName(auth::Access::Full);
+        return makeErrorData(id, auth::ERR_UNAUTHORIZED,
+                             "Forbidden: requires a full-control token", data);
+    }
+    return std::string();
+}
+
+// ---------------------------------------------------------------------------
 // Message processing (JSON-RPC 2.0)
 // ---------------------------------------------------------------------------
 
@@ -114,6 +216,9 @@ std::string MCPServer::processMessage(uint8_t clientId, const std::string& json)
 
     uint32_t id = doc["id"] | 0u;
     std::string method = doc["method"].as<const char*>();
+
+    std::string denied = checkRequest(clientId, method, id);
+    if (!denied.empty()) return denied;
     JsonObject params = doc["params"].is<JsonObject>()
                             ? doc["params"].as<JsonObject>()
                             : JsonObject();
@@ -255,6 +360,7 @@ std::string MCPServer::handleUnsubscribe(uint8_t clientId, uint32_t id,
 }
 
 void MCPServer::removeClient(uint8_t clientId) {
+    clients_.erase(clientId);
     for (auto it = subscriptions_.begin(); it != subscriptions_.end();) {
         it->second.erase(clientId);
         if (it->second.empty()) {
@@ -301,6 +407,21 @@ std::string MCPServer::makeResult(uint32_t id, JsonDocument& resultDoc) {
 
     std::string out;
     serializeJson(env, out);
+    return out;
+}
+
+std::string MCPServer::makeErrorData(uint32_t id, int code, const std::string& message,
+                                     JsonDocument& data) {
+    JsonDocument doc;
+    doc["jsonrpc"] = "2.0";
+    doc["id"]      = id;
+    JsonObject error = doc["error"].to<JsonObject>();
+    error["code"]    = code;
+    error["message"] = message;
+    error["data"]    = data.as<JsonVariant>();
+
+    std::string out;
+    serializeJson(doc, out);
     return out;
 }
 

@@ -202,6 +202,118 @@ void test_remove_client_drops_its_subscriptions() {
     TEST_ASSERT_EQUAL(0, mockWs->getAllNotifications().size());
 }
 
+// --- transport security (issue #12) ---------------------------------------
+
+static auth::Credentials secCreds() {
+    auth::Credentials c;
+    c.fullToken = "full-0123456789abcdef";
+    c.readToken = "read-0123456789abcdef";
+    return c;
+}
+
+void test_auth_off_admits_without_token_with_full_access() {
+    auth::Credentials c = secCreds();
+    c.required = false;
+    server->setCredentials(c);
+    TEST_ASSERT_TRUE(server->admitClient(1, "", "/") == MCPServer::Admission::Accepted);
+    TEST_ASSERT_TRUE(server->clientAccess(1) == auth::Access::Full);
+    std::string resp = mockWs->simulateMessage(1,
+        R"({"jsonrpc":"2.0","method":"resources/list","id":39})");
+    TEST_ASSERT_TRUE(resp.find("\"resources\"") != std::string::npos);
+}
+
+void test_unauthenticated_connection_is_refused() {
+    server->setCredentials(secCreds());
+    TEST_ASSERT_TRUE(server->admitClient(1, "", "/") == MCPServer::Admission::Unauthorized);
+    TEST_ASSERT_TRUE(server->admitClient(1, "Bearer wrong", "/") ==
+                     MCPServer::Admission::Unauthorized);
+    TEST_ASSERT_EQUAL(0, (int)server->clientCount());
+}
+
+void test_message_from_unadmitted_client_is_rejected() {
+    server->setCredentials(secCreds());
+    std::string resp = mockWs->simulateMessage(3,
+        R"({"jsonrpc":"2.0","method":"resources/list","id":40})");
+    TEST_ASSERT_TRUE(resp.find("-32020") != std::string::npos);
+    TEST_ASSERT_TRUE(resp.find("\"resources\"") == std::string::npos);
+}
+
+void test_token_via_header_or_query_admits() {
+    server->setCredentials(secCreds());
+    TEST_ASSERT_TRUE(server->admitClient(1, "Bearer full-0123456789abcdef", "/") ==
+                     MCPServer::Admission::Accepted);
+    TEST_ASSERT_TRUE(server->admitClient(2, "", "/?token=read-0123456789abcdef") ==
+                     MCPServer::Admission::Accepted);
+    TEST_ASSERT_TRUE(server->clientAccess(1) == auth::Access::Full);
+    TEST_ASSERT_TRUE(server->clientAccess(2) == auth::Access::ReadOnly);
+
+    std::string resp = mockWs->simulateMessage(2,
+        R"({"jsonrpc":"2.0","method":"resources/list","id":41})");
+    TEST_ASSERT_TRUE(resp.find("\"resources\"") != std::string::npos);
+}
+
+void test_read_only_client_cannot_call_full_control_methods() {
+    server->setCredentials(secCreds());
+    bool called = false;
+    server->registerMethodHandler("logs/clear",
+        [&called](uint8_t, uint32_t id, const JsonObject&) -> std::string {
+            called = true;
+            return std::string("{\"jsonrpc\":\"2.0\",\"id\":") + std::to_string(id) +
+                   ",\"result\":{}}";
+        });
+    server->admitClient(2, "Bearer read-0123456789abcdef", "/");
+    std::string resp = mockWs->simulateMessage(2,
+        R"({"jsonrpc":"2.0","method":"logs/clear","id":42})");
+    TEST_ASSERT_FALSE(called);
+    TEST_ASSERT_TRUE(resp.find("-32020") != std::string::npos);
+    TEST_ASSERT_TRUE(resp.find("\"required\":\"full\"") != std::string::npos);
+
+    server->admitClient(1, "Bearer full-0123456789abcdef", "/");
+    mockWs->simulateMessage(1, R"({"jsonrpc":"2.0","method":"logs/clear","id":43})");
+    TEST_ASSERT_TRUE(called);
+}
+
+void test_max_clients_enforced_and_slot_reuse_allowed() {
+    server->setCredentials(secCreds());
+    server->setMaxClients(2);
+    const char* tok = "Bearer full-0123456789abcdef";
+    TEST_ASSERT_TRUE(server->admitClient(0, tok, "/") == MCPServer::Admission::Accepted);
+    TEST_ASSERT_TRUE(server->admitClient(1, tok, "/") == MCPServer::Admission::Accepted);
+    TEST_ASSERT_TRUE(server->admitClient(2, tok, "/") == MCPServer::Admission::TooManyClients);
+    // Re-admitting an existing slot replaces it instead of counting twice.
+    TEST_ASSERT_TRUE(server->admitClient(1, tok, "/") == MCPServer::Admission::Accepted);
+    server->removeClient(0);
+    TEST_ASSERT_TRUE(server->admitClient(2, tok, "/") == MCPServer::Admission::Accepted);
+}
+
+void test_removed_client_loses_access() {
+    server->setCredentials(secCreds());
+    server->admitClient(1, "Bearer full-0123456789abcdef", "/");
+    server->removeClient(1);
+    std::string resp = mockWs->simulateMessage(1,
+        R"({"jsonrpc":"2.0","method":"resources/list","id":44})");
+    TEST_ASSERT_TRUE(resp.find("-32020") != std::string::npos);
+}
+
+void test_per_client_rate_limit() {
+    uint32_t fakeNow = 1000;
+    server->setClock([&fakeNow]() { return fakeNow; });
+    server->setCredentials(secCreds());
+    server->setRateLimit(2, 10);
+    server->admitClient(1, "Bearer full-0123456789abcdef", "/");
+    server->admitClient(2, "Bearer full-0123456789abcdef", "/");
+    const char* req = R"({"jsonrpc":"2.0","method":"resources/list","id":45})";
+    TEST_ASSERT_TRUE(mockWs->simulateMessage(1, req).find("-32021") == std::string::npos);
+    TEST_ASSERT_TRUE(mockWs->simulateMessage(1, req).find("-32021") == std::string::npos);
+    std::string limited = mockWs->simulateMessage(1, req);
+    TEST_ASSERT_TRUE(limited.find("-32021") != std::string::npos);
+    TEST_ASSERT_TRUE(limited.find("retryAfterMs") != std::string::npos);
+    // Other clients have their own bucket.
+    TEST_ASSERT_TRUE(mockWs->simulateMessage(2, req).find("-32021") == std::string::npos);
+    fakeNow += 100;
+    TEST_ASSERT_TRUE(mockWs->simulateMessage(1, req).find("-32021") == std::string::npos);
+}
+
 int runUnityTests() {
     UNITY_BEGIN();
     
@@ -213,6 +325,14 @@ int runUnityTests() {
     RUN_TEST(test_handler_bad_alloc_returns_error_and_server_survives);
     RUN_TEST(test_concurrent_clients);
     RUN_TEST(test_remove_client_drops_its_subscriptions);
+    RUN_TEST(test_auth_off_admits_without_token_with_full_access);
+    RUN_TEST(test_unauthenticated_connection_is_refused);
+    RUN_TEST(test_message_from_unadmitted_client_is_rejected);
+    RUN_TEST(test_token_via_header_or_query_admits);
+    RUN_TEST(test_read_only_client_cannot_call_full_control_methods);
+    RUN_TEST(test_max_clients_enforced_and_slot_reuse_allowed);
+    RUN_TEST(test_removed_client_loses_access);
+    RUN_TEST(test_per_client_rate_limit);
     
     return UNITY_END();
 }
