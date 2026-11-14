@@ -210,26 +210,65 @@ std::string MCPServer::processMessage(uint8_t clientId, const std::string& json)
         return makeError(0, -32600, "Invalid Request: missing jsonrpc 2.0");
     }
 
+    // A message with a result/error and no method is a response to a
+    // server-initiated request; we never send any, so drop it silently.
     if (!doc["method"].is<const char*>()) {
+        if (doc["result"].is<JsonVariantConst>() || doc["error"].is<JsonVariantConst>())
+            return std::string();
         return makeError(0, -32600, "Invalid Request: missing method");
     }
 
-    uint32_t id = doc["id"] | 0u;
+    // JSON-RPC: a request without "id" is a notification and MUST NOT be
+    // answered (notifications/initialized, notifications/cancelled, ...).
+    const bool isNotification = !doc["id"].is<JsonVariantConst>() || doc["id"].isNull();
+
+    // Ids may be numbers or strings.  Handlers work with numeric ids; a
+    // string id is swapped for a placeholder and restored in the response.
+    const bool stringId = doc["id"].is<const char*>();
+    std::string originalId = stringId ? doc["id"].as<const char*>() : std::string();
+    uint32_t id = stringId ? 0u : (doc["id"] | 0u);
+
     std::string method = doc["method"].as<const char*>();
 
-    std::string denied = checkRequest(clientId, method, id);
-    if (!denied.empty()) return denied;
-    JsonObject params = doc["params"].is<JsonObject>()
-                            ? doc["params"].as<JsonObject>()
-                            : JsonObject();
+    std::string response = checkRequest(clientId, method, id);
+    if (response.empty()) {
+        if (method.compare(0, 14, "notifications/") == 0) {
+            // initialized / cancelled / roots/list_changed: nothing to do.
+            return std::string();
+        }
+        JsonObject params = doc["params"].is<JsonObject>()
+                                ? doc["params"].as<JsonObject>()
+                                : JsonObject();
+        response = dispatch(clientId, method, id, params);
+    }
+    if (isNotification) return std::string();
 
-    return dispatch(clientId, method, id, params);
+    if (stringId && !response.empty()) {
+        JsonDocument out;
+        if (!deserializeJson(out, response)) {
+            out["id"] = originalId;
+            response.clear();
+            serializeJson(out, response);
+        }
+    }
+    return response;
 }
 
 std::string MCPServer::dispatch(uint8_t clientId, const std::string& method,
                                 uint32_t id, const JsonObject& params) {
     if (method == "initialize") {
-        return handleInitialize(id, params);
+        return handleInitialize(clientId, id, params);
+    }
+    if (method == "ping") {
+        JsonDocument empty;
+        empty.to<JsonObject>();
+        return makeResult(id, empty);
+    }
+    if (method == "tools/list") {
+        return handleToolsList(clientId, id, params);
+    }
+    if (method == "tools/call") {
+        return handleToolsCall(clientId, id, params);
     }
     if (method == "resources/list") {
         return handleResourcesList(id, params);
@@ -247,19 +286,7 @@ std::string MCPServer::dispatch(uint8_t clientId, const std::string& method,
     // Check extension method handlers registered by external components
     auto it = methodHandlers_.find(method);
     if (it != methodHandlers_.end()) {
-        try {
-            return it->second(clientId, id, params);
-        } catch (const std::bad_alloc&) {
-            // Heap exhaustion (e.g. a huge ble/scan/results payload).  NEVER
-            // let the exception escape: on the device it propagates out of
-            // the MCP task through the WebSockets library and std::terminate
-            // reboots the board, dropping every connected client.  Reply with
-            // a JSON-RPC error instead; the client sees a clean failure and
-            // the server keeps serving.
-            return makeError(id, -32603, "Internal error: out of memory");
-        } catch (...) {
-            return makeError(id, -32603, "Internal error");
-        }
+        return invokeHandler(it->second, clientId, id, params);
     }
 
     return makeError(id, -32601, "Method not found");
@@ -269,19 +296,187 @@ std::string MCPServer::dispatch(uint8_t clientId, const std::string& method,
 // Handler implementations
 // ---------------------------------------------------------------------------
 
-std::string MCPServer::handleInitialize(uint32_t id, const JsonObject& /*params*/) {
+std::string MCPServer::invokeHandler(const MethodHandler& handler, uint8_t clientId,
+                                     uint32_t id, const JsonObject& params) {
+    try {
+        return handler(clientId, id, params);
+    } catch (const std::bad_alloc&) {
+        // Heap exhaustion (e.g. a huge ble/scan/results payload).  NEVER let
+        // the exception escape: on the device it propagates out of the MCP
+        // task through the WebSockets library and std::terminate reboots the
+        // board, dropping every connected client.  Reply with a JSON-RPC error
+        // instead; the client sees a clean failure and the server keeps serving.
+        return makeError(id, -32603, "Internal error: out of memory");
+    } catch (...) {
+        return makeError(id, -32603, "Internal error");
+    }
+}
+
+std::string MCPServer::handleInitialize(uint8_t clientId, uint32_t id,
+                                        const JsonObject& params) {
+    // Version negotiation: echo a supported requested version, otherwise
+    // answer with the newest one we speak (the client decides whether it can
+    // continue).  A missing version is tolerated for pre-spec clients.
+    const char* chosen = MCP_LATEST_PROTOCOL_VERSION;
+    JsonVariantConst requested = params["protocolVersion"];
+    if (!requested.isNull()) {
+        if (!requested.is<const char*>()) {
+            JsonDocument data;
+            JsonArray sup = data["supported"].to<JsonArray>();
+            for (const char* v : MCP_PROTOCOL_VERSIONS) sup.add(v);
+            data["requested"] = requested;
+            return makeErrorData(id, -32602, "Unsupported protocol version", data);
+        }
+        const std::string want = requested.as<const char*>();
+        for (const char* v : MCP_PROTOCOL_VERSIONS) {
+            if (want == v) { chosen = v; break; }
+        }
+    }
+
     JsonDocument result;
-    result["protocolVersion"] = PROTOCOL_VERSION;
+    result["protocolVersion"] = chosen;
 
     JsonObject serverInfo = result["serverInfo"].to<JsonObject>();
     serverInfo["name"]    = serverInfo_.name;
+    serverInfo["title"]   = "ESP32 MCP Server";
     serverInfo["version"] = serverInfo_.version;
 
+    // Request/response transports (HTTP sessions) cannot receive
+    // notifications/resources/updated, so they are not offered subscribe.
+    const bool canPush = clientId < MCP_HTTP_CLIENT_BASE;
     JsonObject caps = result["capabilities"].to<JsonObject>();
-    caps["subscriptions"] = capabilities_.supportsSubscriptions;
-    caps["resources"]     = capabilities_.supportsResources;
+    JsonObject res = caps["resources"].to<JsonObject>();
+    res["subscribe"]   = capabilities_.supportsSubscriptions && canPush;
+    res["listChanged"] = false;
+    JsonObject tools = caps["tools"].to<JsonObject>();
+    tools["listChanged"] = false;
+
+    result["instructions"] =
+        "Hardware gateway on an ESP32: read I2C sensors, NMEA/CAN bus history, "
+        "metrics and logs, and scan or connect to Bluetooth LE devices. "
+        "Use tools/list to discover the operations.";
 
     return makeResult(id, result);
+}
+
+// ---------------------------------------------------------------------------
+// Tools (issue #13)
+// ---------------------------------------------------------------------------
+
+void MCPServer::registerTool(const ToolDef& tool) {
+    for (auto& t : tools_) {
+        if (t.name == tool.name) { t = tool; return; }
+    }
+    tools_.push_back(tool);
+}
+
+std::string MCPServer::handleToolsList(uint8_t clientId, uint32_t id,
+                                       const JsonObject& /*params*/) {
+    // Read-only clients only see the tools they may call.
+    const auth::Access access = authEnforced_ ? clientAccess(clientId) : auth::Access::Full;
+    JsonDocument result;
+    JsonArray arr = result["tools"].to<JsonArray>();
+    for (const auto& t : tools_) {
+        if (!auth::methodAllowed(access, t.method)) continue;
+        if (methodHandlers_.find(t.method) == methodHandlers_.end()) continue;
+        JsonObject o = arr.add<JsonObject>();
+        o["name"] = t.name;
+        if (!t.title.empty()) o["title"] = t.title;
+        o["description"] = t.description;
+        o["inputSchema"] = serialized(t.inputSchema);
+        JsonObject ann = o["annotations"].to<JsonObject>();
+        if (!t.title.empty()) ann["title"] = t.title;
+        ann["readOnlyHint"]    = t.readOnly;
+        ann["destructiveHint"] = t.destructive;
+        ann["idempotentHint"]  = t.idempotent;
+        ann["openWorldHint"]   = t.openWorld;
+    }
+    return makeResult(id, result);
+}
+
+// Results larger than this are returned only as structuredContent, with a
+// short text block, so a big scan result is not held twice in RAM.
+static constexpr size_t TOOL_TEXT_MAX = 4096;
+
+std::string MCPServer::handleToolsCall(uint8_t clientId, uint32_t id,
+                                       const JsonObject& params) {
+    if (!params["name"].is<const char*>()) {
+        return makeError(id, -32602, "Invalid params: name required");
+    }
+    const std::string name = params["name"].as<const char*>();
+    const ToolDef* tool = nullptr;
+    for (const auto& t : tools_) {
+        if (t.name == name) { tool = &t; break; }
+    }
+    auto handlerIt = tool ? methodHandlers_.find(tool->method) : methodHandlers_.end();
+    if (!tool || handlerIt == methodHandlers_.end()) {
+        return makeError(id, -32602, "Unknown tool: " + name);
+    }
+
+    // The tool inherits the authorization of the method it wraps.
+    if (authEnforced_) {
+        const auth::Access access = clientAccess(clientId);
+        if (!auth::methodAllowed(access, tool->method)) {
+            JsonDocument data;
+            data["tool"]     = name;
+            data["access"]   = auth::accessName(access);
+            data["required"] = auth::accessName(auth::Access::Full);
+            return makeErrorData(id, auth::ERR_UNAUTHORIZED,
+                                 "Forbidden: requires a full-control token", data);
+        }
+    }
+
+    JsonObject args = params["arguments"].is<JsonObject>()
+                          ? params["arguments"].as<JsonObject>()
+                          : JsonObject();
+    std::string raw = invokeHandler(handlerIt->second, clientId, id, args);
+
+    try {
+        JsonDocument inner;
+        if (deserializeJson(inner, raw)) {
+            return makeError(id, -32603, "Internal error: tool returned invalid JSON");
+        }
+        JsonDocument result;
+        JsonArray content = result["content"].to<JsonArray>();
+        JsonObject text = content.add<JsonObject>();
+        text["type"] = "text";
+
+        if (inner["error"].is<JsonObject>()) {
+            // Tool execution errors are reported inside the result so the
+            // model can see and react to them (MCP spec), keeping the code
+            // and data of the underlying JSON-RPC error.
+            JsonObject err = inner["error"];
+            std::string msg = err["message"] | "Error";
+            if (err["data"].is<JsonVariantConst>()) {
+                std::string data;
+                serializeJson(err["data"], data);
+                msg += " " + data;
+            }
+            text["text"] = msg;
+            result["structuredContent"]["error"] = err;
+            result["isError"] = true;
+            return makeResult(id, result);
+        }
+
+        JsonVariant value = inner["result"];
+        if (value.is<JsonObject>()) {
+            result["structuredContent"] = value;
+        } else {
+            result["structuredContent"]["value"] = value;
+        }
+        std::string body;
+        serializeJson(value, body);
+        if (body.size() <= TOOL_TEXT_MAX) {
+            text["text"] = body;
+        } else {
+            text["text"] = "Result is " + std::to_string(body.size()) +
+                           " bytes; see structuredContent.";
+        }
+        result["isError"] = false;
+        return makeResult(id, result);
+    } catch (const std::bad_alloc&) {
+        return makeError(id, -32603, "Internal error: out of memory");
+    }
 }
 
 std::string MCPServer::handleResourcesList(uint32_t id, const JsonObject& /*params*/) {
@@ -292,7 +487,8 @@ std::string MCPServer::handleResourcesList(uint32_t id, const JsonObject& /*para
         JsonObject obj = arr.add<JsonObject>();
         obj["uri"]         = kv.second.uri;
         obj["name"]        = kv.second.name;
-        obj["type"]        = kv.second.type;
+        obj["mimeType"]    = kv.second.type;
+        obj["type"]        = kv.second.type;   // legacy field
         obj["description"] = kv.second.value;
     }
 
@@ -317,8 +513,10 @@ std::string MCPServer::handleResourceRead(uint32_t id, const JsonObject& params)
 
     JsonArray contents = result["contents"].to<JsonArray>();
     JsonObject content = contents.add<JsonObject>();
-    content["type"] = it->second.type;
-    content["text"] = it->second.value;
+    content["uri"]      = it->second.uri;
+    content["mimeType"] = it->second.type;
+    content["type"]     = it->second.type;   // legacy field
+    content["text"]     = it->second.value;
 
     return makeResult(id, result);
 }

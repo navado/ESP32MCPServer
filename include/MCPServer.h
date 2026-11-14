@@ -8,6 +8,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #ifndef NATIVE_TEST
 #include <WebSocketsServer.h>
@@ -46,6 +47,29 @@ struct ServerCapabilities {
     bool supportsSubscriptions;
     bool supportsResources;
 };
+
+// An MCP tool that exposes an existing JSON-RPC method (issue #13).
+// `inputSchema` is a JSON Schema literal kept in flash and embedded verbatim
+// in tools/list (never parsed or copied to the heap).
+struct ToolDef {
+    std::string name;          // "ble_scan"
+    std::string title;         // "Scan for BLE devices"
+    std::string description;
+    const char* inputSchema = "{\"type\":\"object\"}";
+    std::string method;        // underlying JSON-RPC method, e.g. "ble/scan"
+    bool readOnly    = true;   // annotations (hints for the client)
+    bool destructive = false;
+    bool idempotent  = false;
+    bool openWorld   = false;  // interacts with external entities (BLE peers)
+};
+
+// Protocol revisions this server speaks, newest first.
+constexpr const char* MCP_PROTOCOL_VERSIONS[] = {"2025-06-18", "2025-03-26", "2024-11-05"};
+constexpr const char* MCP_LATEST_PROTOCOL_VERSION = "2025-06-18";
+
+// Client ids at or above this are request/response transports (Streamable
+// HTTP sessions) that cannot receive server-initiated messages.
+constexpr uint8_t MCP_HTTP_CLIENT_BASE = 100;
 
 class MCPServer {
 public:
@@ -96,6 +120,11 @@ public:
     // Remove a previously registered method handler.
     void unregisterMethodHandler(const std::string& method);
 
+    // Expose a registered method as an MCP tool (tools/list, tools/call).
+    void registerTool(const ToolDef& tool);
+    size_t toolCount() const { return tools_.size(); }
+    const std::vector<ToolDef>& tools() const { return tools_; }
+
     // --- Transport security (issue #12) -----------------------------------
     // Enable authentication with these credentials.  Until this is called the
     // server is open (unit tests); the firmware always calls it.
@@ -116,7 +145,6 @@ public:
     size_t clientCount() const { return clients_.size(); }
 
 private:
-    static constexpr const char* PROTOCOL_VERSION = "2024-11-05";
 
     uint16_t port_;
     Implementation serverInfo_{"esp32-mcp-server", "1.0.0"};
@@ -136,6 +164,9 @@ private:
 
     // Extension method registry: method name -> handler
     std::unordered_map<std::string, MethodHandler> methodHandlers_;
+
+    // Tool registry, in registration order (tools/list order).
+    std::vector<ToolDef> tools_;
 
     // Admitted clients: access level + request limiter.
     struct ClientState {
@@ -159,7 +190,11 @@ private:
     std::string dispatch(uint8_t clientId, const std::string& method,
                          uint32_t id, const JsonObject& params);
 
-    std::string handleInitialize(uint32_t id, const JsonObject& params);
+    std::string handleInitialize(uint8_t clientId, uint32_t id, const JsonObject& params);
+    std::string handleToolsList(uint8_t clientId, uint32_t id, const JsonObject& params);
+    std::string handleToolsCall(uint8_t clientId, uint32_t id, const JsonObject& params);
+    std::string invokeHandler(const MethodHandler& handler, uint8_t clientId,
+                              uint32_t id, const JsonObject& params);
     std::string handleResourcesList(uint32_t id, const JsonObject& params);
     std::string handleResourceRead(uint32_t id, const JsonObject& params);
     std::string handleSubscribe(uint8_t clientId, uint32_t id, const JsonObject& params);

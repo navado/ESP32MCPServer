@@ -314,6 +314,184 @@ void test_per_client_rate_limit() {
     TEST_ASSERT_TRUE(mockWs->simulateMessage(1, req).find("-32021") == std::string::npos);
 }
 
+// --- MCP spec compliance (issue #13) ----------------------------------------
+
+static JsonDocument parse(const std::string& s) {
+    JsonDocument d;
+    deserializeJson(d, s);
+    return d;
+}
+
+void test_initialize_echoes_supported_version() {
+    JsonDocument r = parse(mockWs->simulateMessage(1,
+        R"({"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":"2025-03-26"}})"));
+    TEST_ASSERT_EQUAL_STRING("2025-03-26", r["result"]["protocolVersion"]);
+}
+
+void test_initialize_offers_latest_for_unknown_version() {
+    JsonDocument r = parse(mockWs->simulateMessage(1,
+        R"({"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":"1999-01-01"}})"));
+    TEST_ASSERT_EQUAL_STRING(MCP_LATEST_PROTOCOL_VERSION, r["result"]["protocolVersion"]);
+    // Pre-spec clients that send no version still work.
+    r = parse(mockWs->simulateMessage(1, R"({"jsonrpc":"2.0","method":"initialize","id":2})"));
+    TEST_ASSERT_EQUAL_STRING(MCP_LATEST_PROTOCOL_VERSION, r["result"]["protocolVersion"]);
+}
+
+void test_initialize_rejects_malformed_version() {
+    JsonDocument r = parse(mockWs->simulateMessage(1,
+        R"({"jsonrpc":"2.0","method":"initialize","id":3,"params":{"protocolVersion":42}})"));
+    TEST_ASSERT_EQUAL(-32602, r["error"]["code"].as<int>());
+    TEST_ASSERT_TRUE(r["error"]["data"]["supported"].is<JsonArray>());
+}
+
+void test_initialize_capability_objects() {
+    JsonDocument r = parse(mockWs->simulateMessage(1,
+        R"({"jsonrpc":"2.0","method":"initialize","id":4,"params":{"protocolVersion":"2025-06-18"}})"));
+    JsonObject caps = r["result"]["capabilities"];
+    TEST_ASSERT_TRUE(caps["resources"].is<JsonObject>());
+    TEST_ASSERT_TRUE(caps["resources"]["subscribe"].as<bool>());
+    TEST_ASSERT_TRUE(caps["tools"].is<JsonObject>());
+    TEST_ASSERT_TRUE(r["result"]["serverInfo"]["name"].is<const char*>());
+
+    // HTTP sessions cannot receive pushes, so they are not offered subscribe.
+    r = parse(mockWs->simulateMessage(MCP_HTTP_CLIENT_BASE,
+        R"({"jsonrpc":"2.0","method":"initialize","id":5})"));
+    TEST_ASSERT_FALSE(r["result"]["capabilities"]["resources"]["subscribe"].as<bool>());
+}
+
+void test_notifications_get_no_response() {
+    TEST_ASSERT_EQUAL_STRING("", mockWs->simulateMessage(1,
+        R"({"jsonrpc":"2.0","method":"notifications/initialized"})").c_str());
+    TEST_ASSERT_EQUAL_STRING("", mockWs->simulateMessage(1,
+        R"({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":3}})").c_str());
+    // Even an unknown method sent as a notification is not answered.
+    TEST_ASSERT_EQUAL_STRING("", mockWs->simulateMessage(1,
+        R"({"jsonrpc":"2.0","method":"nope"})").c_str());
+    // A stray response from the client is ignored.
+    TEST_ASSERT_EQUAL_STRING("", mockWs->simulateMessage(1,
+        R"({"jsonrpc":"2.0","id":9,"result":{}})").c_str());
+}
+
+void test_ping() {
+    JsonDocument r = parse(mockWs->simulateMessage(1, R"({"jsonrpc":"2.0","method":"ping","id":6})"));
+    TEST_ASSERT_EQUAL(6, r["id"].as<int>());
+    TEST_ASSERT_TRUE(r["result"].is<JsonObject>());
+}
+
+void test_string_ids_round_trip() {
+    JsonDocument r = parse(mockWs->simulateMessage(1,
+        R"({"jsonrpc":"2.0","method":"ping","id":"abc-1"})"));
+    TEST_ASSERT_EQUAL_STRING("abc-1", r["id"]);
+    r = parse(mockWs->simulateMessage(1, R"({"jsonrpc":"2.0","method":"nope","id":"x"})"));
+    TEST_ASSERT_EQUAL_STRING("x", r["id"]);
+    TEST_ASSERT_EQUAL(-32601, r["error"]["code"].as<int>());
+}
+
+void test_resources_read_spec_shape() {
+    server->registerResource(MCPResource("cfg", "test://cfg", "application/json", "{\"a\":1}"));
+    JsonDocument r = parse(mockWs->simulateMessage(1,
+        R"({"jsonrpc":"2.0","method":"resources/read","id":7,"params":{"uri":"test://cfg"}})"));
+    JsonObject c = r["result"]["contents"][0];
+    TEST_ASSERT_EQUAL_STRING("test://cfg", c["uri"]);
+    TEST_ASSERT_EQUAL_STRING("application/json", c["mimeType"]);
+    TEST_ASSERT_EQUAL_STRING("{\"a\":1}", c["text"]);
+}
+
+static void registerEchoTool() {
+    server->registerMethodHandler("test/echo",
+        [](uint8_t, uint32_t id, const JsonObject& p) -> std::string {
+            JsonDocument d;
+            d["jsonrpc"] = "2.0";
+            d["id"] = id;
+            d["result"]["echo"] = p["msg"] | "none";
+            std::string out; serializeJson(d, out); return out;
+        });
+    server->registerMethodHandler("test/fail",
+        [](uint8_t, uint32_t id, const JsonObject&) -> std::string {
+            return "{\"jsonrpc\":\"2.0\",\"id\":" + std::to_string(id) +
+                   ",\"error\":{\"code\":-32010,\"message\":\"Feature busy\",\"data\":{\"state\":\"scanning\"}}}";
+        });
+    ToolDef echo;
+    echo.name = "echo";
+    echo.description = "Echo a message";
+    echo.inputSchema = R"({"type":"object","properties":{"msg":{"type":"string"}}})";
+    echo.method = "test/echo";
+    server->registerTool(echo);
+    ToolDef fail;
+    fail.name = "fail";
+    fail.description = "Always busy";
+    fail.method = "test/fail";
+    fail.readOnly = false;
+    fail.destructive = true;
+    server->registerTool(fail);
+}
+
+void test_tools_list() {
+    registerEchoTool();
+    JsonDocument r = parse(mockWs->simulateMessage(1, R"({"jsonrpc":"2.0","method":"tools/list","id":8})"));
+    JsonArray tools = r["result"]["tools"];
+    TEST_ASSERT_EQUAL(2, (int)tools.size());
+    TEST_ASSERT_EQUAL_STRING("echo", tools[0]["name"]);
+    TEST_ASSERT_EQUAL_STRING("object", tools[0]["inputSchema"]["type"]);
+    TEST_ASSERT_TRUE(tools[0]["inputSchema"]["properties"]["msg"].is<JsonObject>());
+    TEST_ASSERT_TRUE(tools[0]["annotations"]["readOnlyHint"].as<bool>());
+    TEST_ASSERT_TRUE(tools[1]["annotations"]["destructiveHint"].as<bool>());
+}
+
+void test_tools_call_success() {
+    registerEchoTool();
+    JsonDocument r = parse(mockWs->simulateMessage(1,
+        R"({"jsonrpc":"2.0","method":"tools/call","id":9,"params":{"name":"echo","arguments":{"msg":"hi"}}})"));
+    TEST_ASSERT_EQUAL(9, r["id"].as<int>());
+    TEST_ASSERT_FALSE(r["result"]["isError"].as<bool>());
+    TEST_ASSERT_EQUAL_STRING("hi", r["result"]["structuredContent"]["echo"]);
+    TEST_ASSERT_EQUAL_STRING("text", r["result"]["content"][0]["type"]);
+    TEST_ASSERT_EQUAL_STRING("{\"echo\":\"hi\"}", r["result"]["content"][0]["text"]);
+}
+
+void test_tools_call_error_is_reported_in_result() {
+    registerEchoTool();
+    JsonDocument r = parse(mockWs->simulateMessage(1,
+        R"({"jsonrpc":"2.0","method":"tools/call","id":10,"params":{"name":"fail"}})"));
+    TEST_ASSERT_TRUE(r["result"]["isError"].as<bool>());
+    TEST_ASSERT_EQUAL(-32010, r["result"]["structuredContent"]["error"]["code"].as<int>());
+    std::string text = r["result"]["content"][0]["text"] | "";
+    TEST_ASSERT_TRUE(text.find("Feature busy") != std::string::npos);
+    TEST_ASSERT_TRUE(text.find("scanning") != std::string::npos);
+}
+
+void test_tools_call_unknown_tool() {
+    JsonDocument r = parse(mockWs->simulateMessage(1,
+        R"({"jsonrpc":"2.0","method":"tools/call","id":11,"params":{"name":"nope"}})"));
+    TEST_ASSERT_EQUAL(-32602, r["error"]["code"].as<int>());
+}
+
+void test_tools_inherit_method_authorization() {
+    registerEchoTool();
+    // "test/echo" is not on the read-only whitelist, so a read-only client
+    // neither sees nor calls it.
+    server->setCredentials(secCreds());
+    server->admitClient(2, "Bearer read-0123456789abcdef", "/");
+    JsonDocument r = parse(mockWs->simulateMessage(2, R"({"jsonrpc":"2.0","method":"tools/list","id":12})"));
+    TEST_ASSERT_EQUAL(0, (int)r["result"]["tools"].as<JsonArray>().size());
+    r = parse(mockWs->simulateMessage(2,
+        R"({"jsonrpc":"2.0","method":"tools/call","id":13,"params":{"name":"echo"}})"));
+    TEST_ASSERT_EQUAL(-32020, r["error"]["code"].as<int>());
+
+    server->admitClient(1, "Bearer full-0123456789abcdef", "/");
+    r = parse(mockWs->simulateMessage(1, R"({"jsonrpc":"2.0","method":"tools/list","id":14})"));
+    TEST_ASSERT_EQUAL(2, (int)r["result"]["tools"].as<JsonArray>().size());
+}
+
+void test_tool_without_handler_is_hidden() {
+    ToolDef ghost;
+    ghost.name = "ghost";
+    ghost.method = "not/registered";   // e.g. BLE compiled out
+    server->registerTool(ghost);
+    JsonDocument r = parse(mockWs->simulateMessage(1, R"({"jsonrpc":"2.0","method":"tools/list","id":15})"));
+    TEST_ASSERT_EQUAL(0, (int)r["result"]["tools"].as<JsonArray>().size());
+}
+
 int runUnityTests() {
     UNITY_BEGIN();
     
@@ -333,6 +511,20 @@ int runUnityTests() {
     RUN_TEST(test_max_clients_enforced_and_slot_reuse_allowed);
     RUN_TEST(test_removed_client_loses_access);
     RUN_TEST(test_per_client_rate_limit);
+    RUN_TEST(test_initialize_echoes_supported_version);
+    RUN_TEST(test_initialize_offers_latest_for_unknown_version);
+    RUN_TEST(test_initialize_rejects_malformed_version);
+    RUN_TEST(test_initialize_capability_objects);
+    RUN_TEST(test_notifications_get_no_response);
+    RUN_TEST(test_ping);
+    RUN_TEST(test_string_ids_round_trip);
+    RUN_TEST(test_resources_read_spec_shape);
+    RUN_TEST(test_tools_list);
+    RUN_TEST(test_tools_call_success);
+    RUN_TEST(test_tools_call_error_is_reported_in_result);
+    RUN_TEST(test_tools_call_unknown_tool);
+    RUN_TEST(test_tools_inherit_method_authorization);
+    RUN_TEST(test_tool_without_handler_is_hidden);
     
     return UNITY_END();
 }

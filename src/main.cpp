@@ -13,6 +13,8 @@
 #include "BLEScanner.h"
 #include "MemoryPlan.h"
 #include "AuthPolicy.h"
+#include "McpHttpTransport.h"
+#include "McpTools.h"
 #include <Preferences.h>
 #include <esp_random.h>
 
@@ -142,6 +144,7 @@ ESP32I2CInterface i2cBus;
 SensorManager*    sensorManager = nullptr;
 DiscoveryManager  discoveryManager;
 OTAManager        otaManager;
+mcp::McpHttpTransport mcpHttp(mcpServer);   // Streamable HTTP at /mcp (port 80)
 #if BOARD_HAS_BLE
 mcp::BLEScanner   bleScanner;
 #endif
@@ -303,6 +306,7 @@ TaskHandle_t mcpTaskHandle = nullptr;
 void mcpTask(void* parameter) {
     while (true) {
         mcpServer.handleClient();
+        mcpHttp.pump();
         discoveryManager.update();
         vTaskDelay(pdMS_TO_TICKS(10));
     }
@@ -448,6 +452,13 @@ void setup() {
     discoveryManager.begin(discoveryCfg);
     networkManager.setDiscoveryManager(&discoveryManager);
 
+    // MCP credentials are loaded before the network starts so both transports
+    // (WebSocket :9000 and Streamable HTTP /mcp) are authenticated from the
+    // first request.
+    const mcp::auth::Credentials mcpCreds = loadMcpCredentials();
+    mcpHttp.setCredentials(mcpCreds);
+    networkManager.setRouteRegistrar([](AsyncWebServer& web) { mcpHttp.registerRoutes(web); });
+
     // Start network manager
     networkManager.begin();
 
@@ -461,7 +472,7 @@ void setup() {
 
     // Initialize MCP server — authenticated unless this is a lab build with
     // no token provisioned (see loadMcpCredentials()).
-    mcpServer.setCredentials(loadMcpCredentials());
+    mcpServer.setCredentials(mcpCreds);
     mcpServer.setMaxClients(MCP_MAX_CLIENTS);
     mcpServer.setRateLimit(MCP_RATE_BURST, MCP_RATE_PER_SEC);
     mcpServer.begin(networkManager.isConnected());
@@ -926,6 +937,9 @@ void setup() {
             std::string out; serializeJson(doc, out); return out;
         });
 #endif // BOARD_HAS_BLE
+
+    // Expose the methods above as MCP tools (tools/list, tools/call).
+    mcp::registerMcpTools(mcpServer);
 
     // Create MCP task
     xTaskCreatePinnedToCore(
