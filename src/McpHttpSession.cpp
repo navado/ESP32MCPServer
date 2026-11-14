@@ -4,25 +4,52 @@
 namespace mcp {
 namespace http {
 
-SessionTable::SessionTable(size_t capacity, uint32_t idleMs)
-    : slots_(capacity ? capacity : 1), idleMs_(idleMs) {}
+SessionTable::SessionTable(size_t capacity, uint32_t idleMs, uint32_t evictIdleMs)
+    : slots_(capacity ? capacity : 1), idleMs_(idleMs), evictIdleMs_(evictIdleMs) {}
 
 const Session* SessionTable::create(auth::Access access, uint32_t nowMs,
-                                    const std::function<uint32_t()>& rnd) {
-    // Expired slots are NOT reclaimed here: only expire() frees them, and its
-    // caller must release each returned client id in MCPServer.  Reclaiming
-    // silently would leak the server-side client state (and a client slot).
-    for (size_t i = 0; i < slots_.size(); ++i) {
+                                    const std::function<uint32_t()>& rnd,
+                                    int* evictedClientId,
+                                    const std::function<bool(uint8_t)>& mayEvict) {
+    if (evictedClientId) *evictedClientId = -1;
+    auto fill = [&](size_t i) -> const Session* {
         Slot& sl = slots_[i];
-        if (sl.used) continue;
         sl.used         = true;
         sl.s.id         = auth::generateToken(rnd, 16);
         sl.s.clientId   = static_cast<uint8_t>(MCP_HTTP_CLIENT_BASE + i);
         sl.s.access     = access;
         sl.s.lastUsedMs = nowMs;
         return &sl.s;
+    };
+    for (size_t i = 0; i < slots_.size(); ++i) {
+        if (!slots_[i].used) return fill(i);
     }
-    return nullptr;
+    // Full.  Expired slots are not reclaimed silently: only with the caller
+    // taking the evicted client id (or via expire()), so server-side client
+    // state is always released.
+    if (!evictedClientId) return nullptr;
+    size_t lru = slots_.size();
+    uint32_t lruIdle = 0;
+    for (size_t i = 0; i < slots_.size(); ++i) {
+        const Session& cand = slots_[i].s;
+        uint32_t idle = nowMs - cand.lastUsedMs;
+        if (idle < evictIdleMs_) continue;
+        if (static_cast<int>(cand.access) > static_cast<int>(access)) continue;
+        if (mayEvict && !mayEvict(cand.clientId)) continue;
+        if (lru == slots_.size() || idle > lruIdle) {
+            lru = i;
+            lruIdle = idle;
+        }
+    }
+    if (lru == slots_.size()) return nullptr;
+    *evictedClientId = slots_[lru].s.clientId;
+    return fill(lru);
+}
+
+void SessionTable::touch(uint8_t clientId, uint32_t nowMs) {
+    for (auto& sl : slots_) {
+        if (sl.used && sl.s.clientId == clientId) sl.s.lastUsedMs = nowMs;
+    }
 }
 
 const Session* SessionTable::find(const std::string& id, uint32_t nowMs) {
