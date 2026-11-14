@@ -104,6 +104,8 @@ static const char* const kReadOnlyMethods[] = {
     "initialize", "ping", "notifications/initialized",
     "resources/list", "resources/read", "resources/subscribe", "resources/unsubscribe",
     "resources/templates/list",
+    // tools/call is re-checked against the wrapped method (MCPServer).
+    "tools/list", "tools/call",
     "system/features",
     // sensors/i2c/scan is NOT here: re-probing writes init commands to the
     // devices on the bus.

@@ -270,7 +270,7 @@ pio run -t upload -e nrf52840-dk
 2. Connect to that AP and open **`http://192.168.4.1`**.
 3. Enter your WiFi credentials and click Save.
 4. The board joins your network and prints its IP address on the serial console.
-5. Connect an MCP client to **`ws://<IP>:9000`**. MCP authentication is **off by default**, so the examples below work as-is on a trusted network. To require a token, type `auth on` on the serial console (or build with `-D MCP_AUTH_DEFAULT=1`); see [Security](#security).
+5. Connect an MCP client to **`http://<IP>/mcp`** (Streamable HTTP, see [Connecting an MCP client](#connecting-an-mcp-client)), or the legacy WebSocket **`ws://<IP>:9000`**. MCP authentication is **off by default**, so the examples below work as-is on a trusted network. To require a token, type `auth on` on the serial console (or build with `-D MCP_AUTH_DEFAULT=1`); see [Security](#security).
 6. On first boot the serial console prints a generated **OTA password** (`ota show` prints it again).
 
 ---
@@ -328,9 +328,9 @@ Tokens can also be pre-provisioned in an NVS image, like the WiFi credentials.
 - After 5 consecutive wrong logins **from one IP address**, that address gets `429` (with `Retry-After`) for 30 s, doubling up to 5 minutes per further failure. Other hosts are not affected, so a guessing host can't lock the owner out. Up to 32 source addresses are tracked. Beyond that, the remaining sources share one lockout, so rotating addresses doesn't buy extra guesses. The tradeoff: an attacker with more than 32 failing LAN addresses can delay OTA logins from new hosts for a few minutes. USB flashing and the serial console are never affected.
 
 **Not covered yet.**
-- **TLS (`wss://`).** The WebSocket library used here has no server-side TLS on ESP32. On the 4 MB boards there is no flash headroom for it at all. On the ESP32-S3 it needs a different server stack, which is planned with the Streamable HTTP transport (#13). Until then, use a trusted network, or a TLS-terminating proxy or VPN.
-- The port-80 HTTP endpoints (dashboard, WiFi setup, `/bus-history`) are unauthenticated.
-- OAuth 2.1 (MCP authorization for HTTP transports) doesn't fit on the device. The static bearer token matches how MCP clients send `Authorization`, so it carries over to Streamable HTTP.
+- **TLS.** Neither transport is encrypted: the WebSocket library has no server-side TLS on ESP32, and the HTTP server used for `/mcp` doesn't either. On the 4 MB boards there is no flash headroom for TLS at all. Use a trusted network, or a TLS-terminating proxy or VPN.
+- The other port-80 HTTP endpoints (dashboard, WiFi setup, `/bus-history`) are unauthenticated. `/mcp` requires the token when authentication is on.
+- OAuth 2.1 (MCP authorization for HTTP transports) doesn't fit on the device. `/mcp` takes the same static bearer token, which MCP clients can send as a configured `Authorization` header.
 
 ---
 
@@ -361,15 +361,84 @@ A browser-based dashboard is served from flash at **`http://<IP>/app`**.
 
 ---
 
-## MCP API Reference (WebSocket port 9000)
+## MCP API Reference
 
-All methods use **JSON-RPC 2.0** over WebSocket. Connections require an access token (see [Security](#security)).
+All methods use **JSON-RPC 2.0**. No access token is needed unless authentication is turned on (see [Security](#security)). Two transports serve the same methods:
+
+| Transport | Endpoint | Use it for |
+|---|---|---|
+| **Streamable HTTP** (MCP standard) | `POST http://<IP>/mcp` | Standard MCP clients: Claude Code, Claude Desktop through `mcp-remote`, the MCP Inspector, the official SDKs |
+| WebSocket (legacy) | `ws://<IP>:9000` | The web dashboard and existing WebSocket clients; supports push notifications (`resources/subscribe`) |
+
+### Connecting an MCP client
+
+Claude Code:
+
+```bash
+claude mcp add --transport http esp32 http://<IP>/mcp
+# with authentication on:
+claude mcp add --transport http esp32 http://<IP>/mcp --header "Authorization: Bearer <token>"
+```
+
+Claude Desktop, or any stdio-only client, through [`mcp-remote`](https://www.npmjs.com/package/mcp-remote):
+
+```json
+{
+  "mcpServers": {
+    "esp32": {
+      "command": "npx",
+      "args": ["mcp-remote", "http://<IP>/mcp", "--allow-http"]
+    }
+  }
+}
+```
+
+With authentication on, add `"--header", "Authorization:${MCP_AUTH}"` to `args` and `"env": { "MCP_AUTH": "Bearer <token>" }`.
+
+MCP Inspector: `npx @modelcontextprotocol/inspector`, then choose transport *Streamable HTTP*, URL `http://<IP>/mcp` (add the `Authorization` header when authentication is on).
+
+### Streamable HTTP details
+
+- `POST /mcp` takes one JSON-RPC message and returns `application/json`. Notifications get `202 Accepted`.
+- `initialize` (sent without a session id) returns an `Mcp-Session-Id` header that every later request must carry.
+- Unknown or expired sessions get `404`; the client should re-initialize. Sessions expire after 10 minutes idle and count toward the 4-client limit, and `DELETE /mcp` ends one.
+- With authentication on, every request needs `Authorization: Bearer <token>` (`401` otherwise). A browser `Origin` must match the device's host (`403` otherwise), which protects against DNS rebinding.
+- `GET /mcp` returns `405`: the server doesn't open SSE streams, so HTTP clients get no push notifications and `resources.subscribe` is `false` for them.
+- Requests are limited to 16 KB.
+
+### Protocol and capabilities
+
+- **Versions:** `2025-06-18` (preferred), `2025-03-26` and `2024-11-05`. A supported requested version is echoed back; otherwise the server answers with `2025-06-18`. A non-string version is `-32602`.
+- **Capabilities:** `resources: {subscribe, listChanged: false}` and `tools: {listChanged: false}`.
+- **Lifecycle:** `ping`, `notifications/initialized` and `notifications/cancelled` are handled. Notifications never get a response, and string request ids are supported.
+
+### Tools
+
+`tools/list` exposes the device's methods as MCP tools, with JSON Schema inputs and the annotations `readOnlyHint`, `destructiveHint`, `idempotentHint` and `openWorldHint`.
+- `tools/call` returns the method's result in `structuredContent`, plus a JSON text block (results over 4 KB get a one-line text summary to save RAM).
+- A method error (e.g. `Feature busy`) comes back as `isError: true` with the error in `structuredContent.error`.
+- Tools inherit the authorization of the method they wrap. A read-only token only sees and calls the read-only tools.
+
+| Tool | Method |
+|---|---|
+| `sensors_scan`, `sensors_read` | `sensors/i2c/scan`, `sensors/read` |
+| `bus_history_read`, `bus_history_config_get`, `bus_history_config_set` | `bus/history/*` |
+| `metrics_list`, `metrics_get`, `metrics_history`, `logs_clear` | `metrics/*`, `logs/clear` |
+| `ble_scan`, `ble_scan_poll`, `ble_scan_results`, `ble_scan_payloads`, `ble_scan_stop` | `ble/scan*` (BLE boards only) |
+| `ble_connect`, `ble_connect_results`, `ble_services_start`, `ble_services_results`, `ble_services_stop`, `ble_disconnect` | `ble/connect*`, `ble/services/*`, `ble/disconnect` |
+
+The JSON-RPC methods below remain callable directly.
+
+**Not implemented yet:** progress notifications, cancellation of running scans or enumerations, `logging/setLevel`, pagination cursors, `resources/templates/list`, prompts, completion and elicitation.
 
 ### Protocol
 
 | Method | Params | Description |
 |---|---|---|
-| `initialize` | — | Server info, protocol version, capabilities |
+| `initialize` | `protocolVersion?` | Server info, negotiated protocol version, capabilities |
+| `ping` | — | Liveness check; empty result |
+| `tools/list` | — | MCP tools (see [Tools](#tools)) |
+| `tools/call` | `name`, `arguments?` | Call a tool |
 | `resources/list` | — | List registered MCP resources |
 | `resources/read` | `uri` | Read a resource by URI |
 | `resources/subscribe` | `uri` | Subscribe to push updates for a resource |

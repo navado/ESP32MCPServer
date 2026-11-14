@@ -24,6 +24,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   that IP out with `429`.
 
 ### Added
+- **Standard MCP clients can connect** — #13
+  - **Streamable HTTP transport** at `POST /mcp` (port 80): sessions via `Mcp-Session-Id`,
+    bearer auth, Origin check, `202` for notifications, `DELETE` to end a session. Works
+    with Claude Code (`--transport http`), Claude Desktop via `mcp-remote`, and the MCP
+    Inspector.
+  - **Tools:** `tools/list` and `tools/call` expose the sensor, bus-history, metrics and
+    BLE methods as 20 tools with JSON Schema inputs, annotations and `structuredContent`.
+    Tools inherit the method's authorization.
+  - **Lifecycle:** protocol version negotiation (`2025-06-18`, `2025-03-26`,
+    `2024-11-05`), spec-shaped capability objects, `ping`, and notifications
+    (`notifications/initialized` and others) are never answered. String request ids are
+    supported.
+  - `resources/read` / `resources/list` now include `uri` and `mimeType` as the spec
+    requires; the old fields are kept.
 - **Bluetooth LE over MCP (ESP32-S3)** — #9, #11
   - Advertising scanner: `ble/scan`, `ble/scan/results`, `ble/scan/payloads`, `ble/scan/poll`, `ble/scan/stop`.
     Non-blocking scans, per-device raw payload history, a MAC-independent payload registry,
@@ -40,6 +54,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `partitions_4mb_ota.csv` with 1.81 MB OTA slots for 4 MB ESP32 boards — #9.
 
 ### Changed
+- `initialize` returns capability *objects* (`resources: {subscribe, listChanged}`,
+  `tools: {listChanged}`) instead of `{subscriptions: bool, resources: bool}`, and the
+  negotiated protocol version instead of a fixed `2024-11-05` — #13.
+- JSON-RPC messages without an `id` are treated as notifications and get no response.
+  Before, they were answered with `id: 0` — #13.
 - **Upgrading:** MCP clients are unaffected (authentication is off until `auth on`). The
   OTA password changes if it was still `admin`, and the `isDefaultPwd` field is gone from
   `/ota/config` — #12.
