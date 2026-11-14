@@ -7,6 +7,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 #ifndef NATIVE_TEST
 #include <WebSocketsServer.h>
@@ -73,6 +74,19 @@ public:
     // Remove a previously registered method handler.
     void unregisterMethodHandler(const std::string& method);
 
+    // Declare a method namespace (e.g. "ble/") that exists in the protocol
+    // but is not available on this build.  Unregistered methods under the
+    // prefix return -32011 "Feature unavailable" naming `feature` and
+    // `reason`, so clients can tell "not on this board" from a typo (-32601).
+    void registerUnavailableNamespace(const std::string& prefix,
+                                      const std::string& feature,
+                                      const std::string& reason);
+
+    // Called from removeClient() after per-client state is dropped, so other
+    // components can release resources the client owned (issue #15).
+    using ClientRemovedHook = std::function<void(uint8_t clientId)>;
+    void setClientRemovedHook(ClientRemovedHook hook) { clientRemovedHook_ = std::move(hook); }
+
 private:
     static constexpr const char* PROTOCOL_VERSION = "2024-11-05";
 
@@ -94,6 +108,12 @@ private:
 
     // Extension method registry: method name -> handler
     std::unordered_map<std::string, MethodHandler> methodHandlers_;
+
+    struct UnavailableNamespace {
+        std::string prefix, feature, reason;
+    };
+    std::vector<UnavailableNamespace> unavailable_;
+    ClientRemovedHook clientRemovedHook_;
 
     // Dispatch a parsed request to the appropriate handler.
     std::string dispatch(uint8_t clientId, const std::string& method,

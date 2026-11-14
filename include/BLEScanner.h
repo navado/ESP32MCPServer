@@ -155,6 +155,10 @@ public:
 
     // True while the GATT connection has pending enumeration work.
     bool isServicesBusy() const;
+    // Current GATT client state (system/features, structured errors).
+    gattcore::GattState getGattState() const;
+    // True while an enumeration started by getServicesStart() is running.
+    bool isEnumerating() const;
 
     // Advertising report callback (invoked by the BLE stack).
     void onAdv(BLEAdvertisedDevice* adv);

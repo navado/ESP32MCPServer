@@ -6,6 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **Feature/state model and structured errors** — #15
+  - `system/features` (and the subscribable resource `device://features`) reports every
+    feature's availability, state, owner and conflicts, plus the active memory plan.
+  - Stable error codes: `-32010` Feature busy, `-32011` Feature unavailable,
+    `-32012` Resource limit (reserved), `-32013` Feature not ready; `data` names the blocker
+    and the method that resolves it.
+  - Features started by a client are released when it disconnects (scan stopped, GATT
+    link dropped).
+  - BLE is blocked while an OTA update is being written.
 - **Bluetooth LE over MCP (ESP32-S3)** — #9, #11
   - Advertising scanner: `ble/scan`, `ble/scan/results`, `ble/scan/payloads`, `ble/scan/poll`, `ble/scan/stop`.
     Non-blocking scans, per-device raw payload history, a MAC-independent payload registry,
@@ -22,6 +31,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `partitions_4mb_ota.csv` with 1.81 MB OTA slots for 4 MB ESP32 boards — #9.
 
 ### Changed
+- **`ble/*` failure results are now JSON-RPC errors** — #15. `ble/scan` while a scan is
+  running returns `-32010` (with `retryAfterMs`) instead of `{started:false, remainingMs}`;
+  `ble/connect` while busy returns `-32010` instead of `{started:false}`, and a malformed MAC
+  returns `-32602`; `ble/services/start` while not connected returns `-32013`. On boards
+  without BLE, `ble/*` returns `-32011` instead of `-32601`. Clients that checked
+  `started:false` must handle the error instead.
+- Disconnecting a WebSocket client now stops the BLE scan and drops the GATT link it
+  started — #15.
 - **4 MB boards (`esp32-devkitc`, `adafruit-huzzah32`, `m5stack-core`) use a new partition
   table.** It cannot be applied over OTA: flash once over USB, then re-upload the web UI
   with `pio run -e <env> -t uploadfs` (the filesystem moves and shrinks to 128 KB, so its

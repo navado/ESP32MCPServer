@@ -202,6 +202,39 @@ void test_remove_client_drops_its_subscriptions() {
     TEST_ASSERT_EQUAL(0, mockWs->getAllNotifications().size());
 }
 
+void test_unavailable_namespace_returns_structured_error() {
+    server->registerUnavailableNamespace("ble/", "ble.central", "not built for 4 MB flash");
+
+    std::string resp = mockWs->simulateMessage(1,
+        R"({"jsonrpc":"2.0","method":"ble/scan","id":21})");
+    TEST_ASSERT_TRUE(resp.find("-32011") != std::string::npos);
+    TEST_ASSERT_TRUE(resp.find("\"feature\":\"ble.central\"") != std::string::npos);
+    TEST_ASSERT_TRUE(resp.find("not built for 4 MB flash") != std::string::npos);
+
+    // Other unknown methods are still plain "Method not found".
+    resp = mockWs->simulateMessage(1, R"({"jsonrpc":"2.0","method":"blex/scan","id":22})");
+    TEST_ASSERT_TRUE(resp.find("-32601") != std::string::npos);
+}
+
+void test_registered_handler_wins_over_unavailable_namespace() {
+    server->registerUnavailableNamespace("ble/", "ble.central", "compiled out");
+    server->registerMethodHandler("ble/status",
+        [](uint8_t, uint32_t id, const JsonObject&) -> std::string {
+            return std::string("{\"jsonrpc\":\"2.0\",\"id\":") + std::to_string(id) +
+                   ",\"result\":{\"ok\":true}}";
+        });
+    std::string resp = mockWs->simulateMessage(1,
+        R"({"jsonrpc":"2.0","method":"ble/status","id":23})");
+    TEST_ASSERT_TRUE(resp.find("\"ok\":true") != std::string::npos);
+}
+
+void test_client_removed_hook_runs_on_disconnect() {
+    int removed = -1;
+    server->setClientRemovedHook([&removed](uint8_t cid) { removed = cid; });
+    server->removeClient(5);
+    TEST_ASSERT_EQUAL(5, removed);
+}
+
 int runUnityTests() {
     UNITY_BEGIN();
     
@@ -213,6 +246,9 @@ int runUnityTests() {
     RUN_TEST(test_handler_bad_alloc_returns_error_and_server_survives);
     RUN_TEST(test_concurrent_clients);
     RUN_TEST(test_remove_client_drops_its_subscriptions);
+    RUN_TEST(test_unavailable_namespace_returns_structured_error);
+    RUN_TEST(test_registered_handler_wins_over_unavailable_namespace);
+    RUN_TEST(test_client_removed_hook_runs_on_disconnect);
     
     return UNITY_END();
 }

@@ -526,6 +526,20 @@ bool BLEScanner::isServicesBusy() const {
     return b;
 }
 
+gattcore::GattState BLEScanner::getGattState() const {
+    lock();
+    gattcore::GattState s = gattState_;
+    unlock();
+    return s;
+}
+
+bool BLEScanner::isEnumerating() const {
+    lock();
+    bool b = gattcore::gattEnumInProgress(gattState_, loadPending_);
+    unlock();
+    return b;
+}
+
 // ---------------------------------------------------------------------------
 // GATT task
 // ---------------------------------------------------------------------------
