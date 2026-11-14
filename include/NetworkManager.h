@@ -7,6 +7,7 @@
 #include <Preferences.h>
 #include <LittleFS.h>
 #include "RequestQueue.h"
+#include "AuthPolicy.h"
 
 // Forward declarations — avoid pulling ESP32-only headers into every TU.
 class DiscoveryManager;
@@ -69,6 +70,15 @@ public:
     void setRouteRegistrar(std::function<void(AsyncWebServer&)> fn) { routeRegistrar_ = std::move(fn); }
 #endif
 
+    // MCP access tokens (issue #22).  With authentication on, the status and
+    // settings endpoints need a token (reads: either token; changes: the
+    // full-control token).  Call before begin().
+    void setCredentials(const mcp::auth::Credentials& creds) { creds_ = creds; }
+
+    // True while the device has no WiFi network saved and serves its setup
+    // access point: the endpoints stay open so it can be provisioned.
+    bool provisioning() const;
+
     // Process one pending network request synchronously (used in tests
     // where the FreeRTOS background task is not running).
     void handleClient();
@@ -90,6 +100,9 @@ private:
     uint8_t connectAttempts;
     uint32_t lastConnectAttempt;
     NetworkCredentials credentials;
+    mcp::auth::Credentials creds_ = [] { mcp::auth::Credentials c; c.required = false; return c; }();
+    // Answers 401/403 itself and returns false when `request` lacks the access `need`s.
+    bool allow(AsyncWebServerRequest* request, mcp::auth::HttpNeed need);
     DiscoveryManager*  discovery_   = nullptr;
     mcp::BusHistory*   busHistory_  = nullptr;
 #ifndef NATIVE_TEST

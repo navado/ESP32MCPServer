@@ -564,6 +564,7 @@ void setup() {
     // first request.
     const mcp::auth::Credentials mcpCreds = loadMcpCredentials();
     mcpHttp.setCredentials(mcpCreds);
+    networkManager.setCredentials(mcpCreds);   // port-80 endpoints (#22)
     networkManager.setRouteRegistrar([](AsyncWebServer& web) { mcpHttp.registerRoutes(web); });
 
     // Start network manager

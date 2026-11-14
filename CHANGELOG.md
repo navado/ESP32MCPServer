@@ -6,6 +6,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Security
+- **Port-80 endpoints require the token when MCP auth is on** — #22. `/status`, `/ws`,
+  `/discovery` and `/bus-history` reads accept either token; `/save` and the settings
+  changes need the full-control token (`401` / `403`). The HTML pages stay public and ask
+  for the token. WiFi provisioning on the setup access point (no network saved yet) stays
+  open. No change with auth off.
 - **Optional MCP access tokens** — #12
   - **Off by default**: existing clients and examples keep working unchanged. Turn it on
     with the serial command `auth on` (or `auth off` to undo), or ship it on with the
@@ -109,6 +114,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   runtime, by the memory plan. — #9, #11
 
 ### Fixed
+- `GET /ota/status` and `GET /ota/config` returned the OTA upload page: the `/ota` route
+  matched them as a prefix. — #21
 - Boot loop on startup: lwIP was used before initialisation (`Invalid mbox`). — #9
 - Uncaught exceptions in MCP method handlers rebooted the board; they now return a
   JSON-RPC `-32603` error. — #9
